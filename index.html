@@ -38,14 +38,14 @@
                 
                 startBtn.disabled = true;
                 stopBtn.disabled = false;
-                status.innerText = "録音中... (マイクは正常です)";
+                status.innerText = "録音中...";
             } catch (e) {
-                status.innerText = "エラー: マイクにアクセスできませんでした。";
+                status.innerText = "エラー: マイクにアクセスできません。";
             }
         };
 
         stopBtn.onclick = () => {
-            status.innerText = "送信中... しばらくお待ちください。";
+            status.innerText = "送信中... 30秒ほどかかる場合があります。";
             stopBtn.disabled = true;
             rec.stop();
             rec.onstop = async () => {
@@ -55,19 +55,29 @@
                 reader.onloadend = async () => {
                     const base64Data = reader.result.split(',')[1];
                     try {
+                        // GASへデータを送信
                         await fetch(GAS_URL, {
                             method: "POST",
                             body: base64Data,
-                            mode: "no-cors" // Googleのセキュリティ制限を回避
+                            mode: "no-cors" 
                         });
-                        status.innerText = "送信完了！スプレッドシートを確認してください。";
+                        
+                        // 送信完了後の表示をボタン付きにする
+                        status.innerHTML = `
+                            <p style="color:green;">送信完了しました！</p>
+                            <a href="https://docs.google.com/spreadsheets/u/0/" target="_blank" 
+                               style="display:inline-block; padding:15px 25px; background:#4285f4; color:white; text-decoration:none; border-radius:5px; font-weight:bold;">
+                               スプレッドシートを確認する
+                            </a>
+                            <br><br>
+                            <small>※反映まで数十秒かかる場合があります</small>
+                        `;
                     } catch (e) {
                         status.innerText = "送信エラーが発生しました。";
                     }
                     startBtn.disabled = false;
+                    chunks = [];
                 };
             };
         };
     </script>
-</body>
-</html>
