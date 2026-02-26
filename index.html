@@ -20,82 +20,94 @@
     <p id="status">ステータス: 準備完了</p>
 
     <script>
-        // ★ここに自分のGASのURLを貼り付けてください
         const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
 
-    let rec, chunks = [];
-    let timer; 
-    const startBtn = document.getElementById('start');
-    const stopBtn = document.getElementById('stop');
-    const status = document.getElementById('status');
+        let rec, chunks = [];
+        let timer; 
+        let isFirstTime = true; // ★初回判定用
+        const startBtn = document.getElementById('start');
+        const stopBtn = document.getElementById('stop');
+        const status = document.getElementById('status');
 
-    startBtn.onclick = async () => {
-        try {
-            const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-            rec = new MediaRecorder(s);
-            chunks = [];
+        startBtn.onclick = async () => {
+            try {
+                const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+                rec = new MediaRecorder(s);
+                chunks = [];
+                isFirstTime = true; // 録音開始時にリセット
+                
+                rec.ondataavailable = e => chunks.push(e.data);
+                
+                rec.onstop = async () => {
+                    if (chunks.length > 0) {
+                        const blob = new Blob(chunks, { type: "audio/mpeg" });
+                        
+                        // ★状態を判定して送信
+                        let sendType = "memo";
+                        if (isFirstTime) {
+                            sendType = "start";
+                            isFirstTime = false; // 次からは memo になる
+                        }
+                        // もし録音機が完全に止まっていて（stopボタン経由）、タイマーも止まっていたら final
+                        if (rec.state === "inactive" && !timer) {
+                            sendType = "final";
+                        }
+
+                        sendToGAS(blob, sendType);
+                        chunks = []; 
+                    }
+                };
+
+                rec.start();
+
+                // 10秒ごとに区切って送信
+                timer = setInterval(() => {
+                    if (rec.state === "recording") {
+                        rec.stop(); 
+                        rec.start(); 
+                    }
+                }, 10000); 
+
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                status.innerHTML = "録音中...<br>（10秒ごとに自動保存、最後に議事録作成）";
+            } catch (e) {
+                status.innerText = "エラー: マイクにアクセスできません。";
+            }
+        };
+
+        stopBtn.onclick = () => {
+            // ★先にタイマーを止めることで、onstop側で final 判定ができるようにする
+            clearInterval(timer);
+            timer = null; 
             
-            rec.ondataavailable = e => chunks.push(e.data);
-            
-            // 録音停止時（自動分割時も含む）にGASへ送信
-            rec.onstop = async () => {
-                if (chunks.length > 0) {
-                    const blob = new Blob(chunks, { type: "audio/mpeg" });
-                    sendToGAS(blob);
-                    chunks = []; 
+            if (rec && rec.state !== "inactive") {
+                rec.stop();
+            }
+            status.innerHTML = "最終データを送信し、議事録を作成中...<br><a href='https://docs.google.com/spreadsheets/u/0/' target='_blank'>スプレッドシートを確認</a>";
+            stopBtn.disabled = true;
+            startBtn.disabled = false;
+        };
+
+        async function sendToGAS(blob, type) {
+            const reader = new FileReader();
+            reader.readAsDataURL(blob);
+            reader.onloadend = async () => {
+                const base64Data = reader.result.split(',')[1];
+                const targetUrl = `${GAS_URL}?type=${type}`;
+                
+                try {
+                    await fetch(targetUrl, {
+                        method: "POST",
+                        body: base64Data,
+                        mode: "no-cors"
+                    });
+                    console.log("送信成功タイプ: " + type);
+                } catch (e) {
+                    console.error("送信エラー", e);
                 }
             };
-
-            rec.start();
-
-            // ★テスト用：10秒（10000ms）ごとに自動で区切る
-            timer = setInterval(() => {
-                if (rec.state === "recording") {
-                    rec.stop(); // 停止させるとonstopが走り送信される
-                    rec.start(); // すぐに次の10秒の録音を開始
-                }
-            }, 10000); 
-
-            startBtn.disabled = true;
-            stopBtn.disabled = false;
-            status.innerHTML = "録音中...<br>（10秒ごとに自動でGASへ送信します）";
-        } catch (e) {
-            status.innerText = "エラー: マイクにアクセスできません。";
         }
-    };
-
-    stopBtn.onclick = () => {
-        clearInterval(timer); // タイマー停止
-        if (rec && rec.state !== "inactive") {
-            rec.stop();
-        }
-        status.innerHTML = "最終データを送信中...<br><a href='https://docs.google.com/spreadsheets/u/0/' target='_blank'>スプレッドシートを確認</a>";
-        stopBtn.disabled = true;
-        startBtn.disabled = false;
-    };
-
-async function sendToGAS(blob, type) {
-    const reader = new FileReader();
-    reader.readAsDataURL(blob);
-    reader.onloadend = async () => {
-        const base64Data = reader.result.split(',')[1];
-        // URLに type (start / memo / final) を付与する
-        const targetUrl = `${GAS_URL}?type=${type}`;
-        
-        try {
-            await fetch(targetUrl, {
-                method: "POST",
-                body: base64Data,
-                mode: "no-cors"
-            });
-        } catch (e) {
-            console.error("送信エラー", e);
-        }
-    };
-}
-
-// --- 呼び出し側のイメージ ---
-// 録音開始直後の最初の10秒送信時： sendToGAS(blob, "start");
-// 10秒ごとの自動送信時： sendToGAS(blob, "memo");
-// 停止ボタンを押した最後の送信時： sendToGAS(blob, "final");
-</script>
+    </script>
+</body>
+</html>
