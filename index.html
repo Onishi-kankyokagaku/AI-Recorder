@@ -74,21 +74,28 @@
         startBtn.disabled = false;
     };
 
-    async function sendToGAS(blob) {
-        const reader = new FileReader();
-        reader.readAsDataURL(blob);
-        reader.onloadend = async () => {
-            const base64Data = reader.result.split(',')[1];
-            try {
-                await fetch(GAS_URL, {
-                    method: "POST",
-                    body: base64Data,
-                    mode: "no-cors"
-                });
-                console.log("10秒分 送信完了");
-            } catch (e) {
-                console.error("送信エラー", e);
-            }
-        };
-    }
+async function sendToGAS(blob, type) {
+    const reader = new FileReader();
+    reader.readAsDataURL(blob);
+    reader.onloadend = async () => {
+        const base64Data = reader.result.split(',')[1];
+        // URLに type (start / memo / final) を付与する
+        const targetUrl = `${GAS_URL}?type=${type}`;
+        
+        try {
+            await fetch(targetUrl, {
+                method: "POST",
+                body: base64Data,
+                mode: "no-cors"
+            });
+        } catch (e) {
+            console.error("送信エラー", e);
+        }
+    };
+}
+
+// --- 呼び出し側のイメージ ---
+// 録音開始直後の最初の10秒送信時： sendToGAS(blob, "start");
+// 10秒ごとの自動送信時： sendToGAS(blob, "memo");
+// 停止ボタンを押した最後の送信時： sendToGAS(blob, "final");
 </script>
