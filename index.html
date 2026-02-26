@@ -82,8 +82,14 @@
             
             if (rec && rec.state !== "inactive") {
                 rec.stop();
+                
+                // ★ここを追加：マイクの接続を完全に切断する
+                const stream = rec.stream;
+                const tracks = stream.getTracks();
+                tracks.forEach(track => track.stop()); // 全てのマイク接続を停止
             }
-            // 表示を「送信しました」に切り替え
+
+            // 表示を更新
             status.innerHTML = "最終データを送信しました。議事録の作成には数十秒かかる場合があります。<br><br><a href='https://docs.google.com/spreadsheets/u/0/' target='_blank' style='display:inline-block; padding:10px 20px; background:#4285f4; color:white; text-decoration:none; border-radius:5px;'>スプレッドシートを確認</a>";
             stopBtn.disabled = true;
             startBtn.disabled = false;
