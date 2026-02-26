@@ -23,61 +23,72 @@
         // ★ここに自分のGASのURLを貼り付けてください
         const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
 
-        let rec, chunks = [];
-        const startBtn = document.getElementById('start');
-        const stopBtn = document.getElementById('stop');
-        const status = document.getElementById('status');
+    let rec, chunks = [];
+    let timer; 
+    const startBtn = document.getElementById('start');
+    const stopBtn = document.getElementById('stop');
+    const status = document.getElementById('status');
 
-        startBtn.onclick = async () => {
+    startBtn.onclick = async () => {
+        try {
+            const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+            rec = new MediaRecorder(s);
+            chunks = [];
+            
+            rec.ondataavailable = e => chunks.push(e.data);
+            
+            // 録音停止時（自動分割時も含む）にGASへ送信
+            rec.onstop = async () => {
+                if (chunks.length > 0) {
+                    const blob = new Blob(chunks, { type: "audio/mpeg" });
+                    sendToGAS(blob);
+                    chunks = []; 
+                }
+            };
+
+            rec.start();
+
+            // ★テスト用：10秒（10000ms）ごとに自動で区切る
+            timer = setInterval(() => {
+                if (rec.state === "recording") {
+                    rec.stop(); // 停止させるとonstopが走り送信される
+                    rec.start(); // すぐに次の10秒の録音を開始
+                }
+            }, 10000); 
+
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            status.innerHTML = "録音中...<br>（10秒ごとに自動でGASへ送信します）";
+        } catch (e) {
+            status.innerText = "エラー: マイクにアクセスできません。";
+        }
+    };
+
+    stopBtn.onclick = () => {
+        clearInterval(timer); // タイマー停止
+        if (rec && rec.state !== "inactive") {
+            rec.stop();
+        }
+        status.innerHTML = "最終データを送信中...<br><a href='https://docs.google.com/spreadsheets/u/0/' target='_blank'>スプレッドシートを確認</a>";
+        stopBtn.disabled = true;
+        startBtn.disabled = false;
+    };
+
+    async function sendToGAS(blob) {
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onloadend = async () => {
+            const base64Data = reader.result.split(',')[1];
             try {
-                const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-                rec = new MediaRecorder(s);
-                chunks = [];
-                rec.ondataavailable = e => chunks.push(e.data);
-                rec.start();
-                
-                startBtn.disabled = true;
-                stopBtn.disabled = false;
-                status.innerText = "録音中...";
+                await fetch(GAS_URL, {
+                    method: "POST",
+                    body: base64Data,
+                    mode: "no-cors"
+                });
+                console.log("10秒分 送信完了");
             } catch (e) {
-                status.innerText = "エラー: マイクにアクセスできません。";
+                console.error("送信エラー", e);
             }
         };
-
-        stopBtn.onclick = () => {
-            status.innerText = "送信中... 30秒ほどかかる場合があります。";
-            stopBtn.disabled = true;
-            rec.stop();
-            rec.onstop = async () => {
-                const blob = new Blob(chunks, { type: "audio/mpeg" });
-                const reader = new FileReader();
-                reader.readAsDataURL(blob);
-                reader.onloadend = async () => {
-                    const base64Data = reader.result.split(',')[1];
-                    try {
-                        // GASへデータを送信
-                        await fetch(GAS_URL, {
-                            method: "POST",
-                            body: base64Data,
-                            mode: "no-cors" 
-                        });
-                        
-                        // 送信完了後の表示をボタン付きにする
-                        status.innerHTML = `
-                            <p style="color:green;">送信完了しました！</p>
-                            <a href="https://docs.google.com/spreadsheets/u/0/" target="_blank" 
-                               style="display:inline-block; padding:15px 25px; background:#4285f4; color:white; text-decoration:none; border-radius:5px; font-weight:bold;">
-                               スプレッドシートを確認する
-                            </a>
-                            <br><br>
-                            <small>※反映まで数十秒かかる場合があります</small>
-                        `;
-                    } catch (e) {
-                        status.innerText = "送信エラーが発生しました。";
-                    }
-                    startBtn.disabled = false;
-                    chunks = [];
-                };
-            };
-        };
-    </script>
+    }
+</script>
