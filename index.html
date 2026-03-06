@@ -95,25 +95,39 @@
             startBtn.disabled = false;
         };
         
-        async function sendToGAS(blob, type) {
-            const reader = new FileReader();
-            reader.readAsDataURL(blob);
-            reader.onloadend = async () => {
-                const base64Data = reader.result.split(',')[1];
-                const targetUrl = `${GAS_URL}?type=${type}`;
-                
-                try {
-                    await fetch(targetUrl, {
-                        method: "POST",
-                        body: base64Data,
-                        mode: "no-cors"
-                    });
-                    console.log("送信成功タイプ: " + type);
-                } catch (e) {
-                    console.error("送信エラー", e);
+    async function sendToGAS(blob, type) {
+        const reader = new FileReader();
+        reader.readAsDataURL(blob); 
+        reader.onloadend = async () => {
+            const base64Data = reader.result.split(',')[1];
+            // URLパラメータにtypeを付与
+            const targetUrl = `${GAS_URL}?type=${type}`;
+            
+            try {
+                const response = await fetch(targetUrl, {
+                    method: "POST",
+                    mode: "cors", // no-corsからcorsに変更
+                    body: base64Data,
+                    headers: {
+                        // ここはあえて空にするか、Content-Typeを指定しないのがGAS連携のコツです
+                    }
+                });
+    
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log("GASからのレスポンス:", data);
+                    
+                    if (data.url) {
+                        // ステータス欄にリンクを表示
+                        status.innerHTML += `<br><a href="${data.url}" target="_blank" style="display:inline-block; margin-top:10px; padding:10px; background:#4285f4; color:white; text-decoration:none; border-radius:5px;">スプレッドシートを開く</a>`;
+                    }
                 }
-            };
-        }
+            } catch (e) {
+                // CORSエラーが出る場合は、GAS側の公開設定が「全員（匿名含む）」になっているか再確認
+                console.error("URL取得に失敗しました。CORSエラーの可能性があります:", e);
+            }
+        };
+    }
     </script>
 </body>
 </html>
