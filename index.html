@@ -18,7 +18,11 @@
     <button id="start">● 録音開始</button>
     <button id="stop" disabled>■ 停止・送信</button>
     <p id="status">ステータス: 準備完了</p>
-
+    
+    <audio id="silent-audio" loop>
+        <source src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=" type="audio/wav">
+    </audio>
+    
     <script>
         const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
 
@@ -31,7 +35,12 @@
 
         startBtn.onclick = async () => {
             try {
+                // --- 既存のマイク取得処理 ---
                 const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                // ★追加：無音再生を開始してブラウザを「不眠」にする
+                const silentAudio = document.getElementById('silent-audio');
+                silentAudio.play();
                 rec = new MediaRecorder(s);
                 chunks = [];
                 isFirstTime = true; // 録音開始時にリセット
