@@ -29,15 +29,20 @@ self.onmessage = async (e) => {
     }
 };
 
-async function encodeAsMp3(blob) {
-    const arrayBuffer = await blob.arrayBuffer();
-    // Worker内には AudioContext がないため、簡易的な波形解析で処理
-    // ※lamejsによるエンコード処理
-    const samples = new Int16Array(arrayBuffer); // 簡易化のため
-    const mp3enc = new lamejs.Mp3Encoder(1, 44100, 128);
-    const mp3Data = [];
+// worker.js 内の encodeAsMp3 を修正
+function encodeAsMp3(arrayBuffer, sampleRate) {
+    const floatSamples = new Float32Array(arrayBuffer);
+    const samples = new Int16Array(floatSamples.length);
     
+    // Float(-1.0〜1.0) を Int16(-32768〜32767) に変換
+    for (let i = 0; i < floatSamples.length; i++) {
+        samples[i] = floatSamples[i] < 0 ? floatSamples[i] * 0x8000 : floatSamples[i] * 0x7FFF;
+    }
+
+    const mp3enc = new lamejs.Mp3Encoder(1, sampleRate, 128);
+    const mp3Data = [];
     const sampleBlockSize = 1152;
+    
     for (let i = 0; i < samples.length; i += sampleBlockSize) {
         const sampleChunk = samples.subarray(i, i + sampleBlockSize);
         const mp3buf = mp3enc.encodeBuffer(sampleChunk);
