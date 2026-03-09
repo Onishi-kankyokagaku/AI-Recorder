@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>AI議事録レコーダー（Worker安定版）</title>
+    <title>AI議事録レコーダー（Worker/10分区切り版）</title>
     <style>
         body { font-family: sans-serif; text-align: center; padding-top: 50px; background: #f4f7f6; }
         button { font-size: 1.2rem; padding: 15px 30px; margin: 10px; border: none; border-radius: 50px; cursor: pointer; transition: 0.3s; }
@@ -44,15 +44,16 @@
                     }
                 }
                 if (data.type === 'final') {
-                    status.innerHTML = "議事録の作成が完了しました。スプレッドシートを確認してください。";
+                    status.innerHTML = "議事録の作成が完了しました。";
                 }
-                console.log("Worker処理成功:", data.type);
+                console.log("Worker完了:", data.type);
             } else {
-                status.innerHTML += `<br><span style="color:red;">Workerエラー: ${data.error}</span>`;
+                status.innerHTML += `<br><span style="color:red;">Error: ${data.error}</span>`;
             }
         };
 
-        const startRecordingSegment = async (stream) => {
+        // 録音の1区切り（セグメント）を処理する関数
+        const startSegment = async (stream) => {
             let chunks = [];
             rec = new MediaRecorder(stream);
             
@@ -66,6 +67,7 @@
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
                     const floatArray = buffer.getChannelData(0);
+                    // 1回目ならstart、停止ボタン押下後ならfinal、それ以外はmemo
                     const sendType = isFirstTime ? "start" : (isFinalAction ? "final" : "memo");
                     
                     worker.postMessage({
@@ -76,8 +78,8 @@
                     }, [floatArray.buffer]);
                     
                     isFirstTime = false;
-                    // 停止ボタンが押されていないなら、すぐに次のセグメントを開始
-                    if (!isFinalAction) startRecordingSegment(stream);
+                    // 停止ボタンが押されていないなら、次の10分を開始
+                    if (!isFinalAction) startSegment(stream);
                 });
             };
             rec.start();
@@ -90,18 +92,18 @@
                 
                 isFirstTime = true;
                 isFinalAction = false;
-                startRecordingSegment(stream);
+                startSegment(stream);
 
-                // 10分ごとに録音を「切り替える」ことで確実にデータを送る
+                // 10分（600000ms）ごとに録音を一旦止めて、次のセグメントへ
                 timer = setInterval(() => {
                     if (rec && rec.state === "recording") rec.stop();
                 }, 600000); 
 
                 startBtn.disabled = true;
                 stopBtn.disabled = false;
-                status.innerHTML = "録音中...<br>（10分ごとにWorker経由で自動保存中）";
+                status.innerHTML = "録音中...（10分ごとに自動保存・Worker処理中）";
             } catch (err) {
-                status.innerText = "エラー: マイクにアクセスできません。" + err;
+                status.innerText = "エラー: " + err;
             }
         };
 
@@ -109,10 +111,10 @@
             isFinalAction = true;
             clearInterval(timer);
             if (rec && rec.state !== "inactive") {
-                rec.stop();
+                rec.stop(); // これにより最後のonstopが走り、type="final"が送られる
                 rec.stream.getTracks().forEach(track => track.stop());
             }
-            status.innerHTML = "最終データを送信中...<br>議事録を作成しています。数秒お待ちください。";
+            status.innerHTML = "最終データを送信中...<br>議事録を作成しています。";
             stopBtn.disabled = true;
         };
     </script>
