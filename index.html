@@ -1,82 +1,120 @@
-<script>
-    const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
-    
-    let rec, timer;
-    let isFirstTime = true;
-    let isFinalAction = false;
-    const worker = new Worker('worker.js');
-    
-    const startBtn = document.getElementById('start');
-    const stopBtn = document.getElementById('stop');
-    const status = document.getElementById('status');
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>AI議事録レコーダー（Worker安定版）</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding-top: 50px; background: #f4f7f6; }
+        button { font-size: 1.2rem; padding: 15px 30px; margin: 10px; border: none; border-radius: 50px; cursor: pointer; transition: 0.3s; }
+        #start { background: #4CAF50; color: white; }
+        #stop { background: #f44336; color: white; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        #status { margin-top: 20px; color: #555; font-weight: bold; line-height: 1.6; }
+        .ss-link { display: inline-block; margin-top: 10px; padding: 10px 20px; background: #4285f4; color: white; text-decoration: none; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>AI議事録レコーダー</h1>
+    <button id="start">● 録音開始</button>
+    <button id="stop" disabled>■ 停止・議事録作成</button>
+    <p id="status">ステータス: 準備完了</p>
 
-    worker.onmessage = (e) => {
-        const data = e.data;
-        if (data.status === 'success') {
-            if (data.result.url && (data.type === 'start' || data.type === 'final')) {
-                if (!document.querySelector('.ss-link')) {
-                    status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
+    <audio id="silent-audio" loop>
+        <source src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=" type="audio/wav">
+    </audio>
+
+    <script>
+        const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
+        
+        let rec, timer, audioCtx;
+        let isFirstTime = true;
+        let isFinalAction = false;
+        const worker = new Worker('worker.js');
+        
+        const startBtn = document.getElementById('start');
+        const stopBtn = document.getElementById('stop');
+        const status = document.getElementById('status');
+
+        worker.onmessage = (e) => {
+            const data = e.data;
+            if (data.status === 'success') {
+                if (data.result.url && (data.type === 'start' || data.type === 'final')) {
+                    if (!document.querySelector('.ss-link')) {
+                        status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
+                    }
                 }
+                if (data.type === 'final') {
+                    status.innerHTML = "議事録の作成が完了しました。スプレッドシートを確認してください。";
+                }
+                console.log("Worker処理成功:", data.type);
+            } else {
+                status.innerHTML += `<br><span style="color:red;">Workerエラー: ${data.error}</span>`;
             }
-            if (data.type === 'final') {
-                status.innerHTML = "議事録の作成が完了しました。";
-            }
-        }
-    };
+        };
 
-    startBtn.onclick = async () => {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            document.getElementById('silent-audio').play();
-            isFirstTime = true;
-            isFinalAction = false;
-
-            const startSegment = () => {
-                let chunks = [];
-                rec = new MediaRecorder(stream);
-                rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+        const startRecordingSegment = async (stream) => {
+            let chunks = [];
+            rec = new MediaRecorder(stream);
+            
+            rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+            
+            rec.onstop = async () => {
+                if (chunks.length === 0) return;
+                const blob = new Blob(chunks, { type: 'audio/webm' });
+                const arrayBuffer = await blob.arrayBuffer();
                 
-                rec.onstop = async () => {
-                    const blob = new Blob(chunks, { type: 'audio/webm' }); // 一旦webmで受ける
-                    const arrayBuffer = await blob.arrayBuffer();
-                    
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+                    const floatArray = buffer.getChannelData(0);
                     const sendType = isFirstTime ? "start" : (isFinalAction ? "final" : "memo");
                     
-                    // Workerに丸投げ（デコードもWorker内でやるのが一番安全です）
                     worker.postMessage({
-                        arrayBuffer: arrayBuffer,
+                        floatArray: floatArray,
+                        sampleRate: buffer.sampleRate,
                         type: sendType,
                         gasUrl: GAS_URL
-                    }, [arrayBuffer]);
-
+                    }, [floatArray.buffer]);
+                    
                     isFirstTime = false;
-                    if (!isFinalAction) startSegment(); // 停止ボタンでないなら次を開始
-                };
-                rec.start();
+                    // 停止ボタンが押されていないなら、すぐに次のセグメントを開始
+                    if (!isFinalAction) startRecordingSegment(stream);
+                });
             };
+            rec.start();
+        };
 
-            startSegment();
+        startBtn.onclick = async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                document.getElementById('silent-audio').play();
+                
+                isFirstTime = true;
+                isFinalAction = false;
+                startRecordingSegment(stream);
 
-            timer = setInterval(() => {
-                if (rec && rec.state === "recording") rec.stop(); // 10分ごとに一度止めて送信
-            }, 600000); 
+                // 10分ごとに録音を「切り替える」ことで確実にデータを送る
+                timer = setInterval(() => {
+                    if (rec && rec.state === "recording") rec.stop();
+                }, 600000); 
 
-            startBtn.disabled = true;
-            stopBtn.disabled = false;
-            status.innerHTML = "録音中...（10分ごとにWorker経由で保存）";
-        } catch (err) {
-            status.innerText = "エラー: " + err;
-        }
-    };
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                status.innerHTML = "録音中...<br>（10分ごとにWorker経由で自動保存中）";
+            } catch (err) {
+                status.innerText = "エラー: マイクにアクセスできません。" + err;
+            }
+        };
 
-    stopBtn.onclick = () => {
-        isFinalAction = true;
-        clearInterval(timer);
-        if (rec && rec.state !== "inactive") {
-            rec.stop();
-            rec.stream.getTracks().forEach(track => track.stop());
-        }
-        status.innerHTML = "最終データを送信中...";
-        stopBtn.disabled = true;
-    };
-</script>
+        stopBtn.onclick = () => {
+            isFinalAction = true;
+            clearInterval(timer);
+            if (rec && rec.state !== "inactive") {
+                rec.stop();
+                rec.stream.getTracks().forEach(track => track.stop());
+            }
+            status.innerHTML = "最終データを送信中...<br>議事録を作成しています。数秒お待ちください。";
+            stopBtn.disabled = true;
+        };
+    </script>
+</body>
+</html>
