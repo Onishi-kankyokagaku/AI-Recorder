@@ -55,18 +55,28 @@
             rec = new MediaRecorder(stream);
             isFirstTime = true;
             
-            rec.ondataavailable = e => {
-                if (e.data.size > 0) {
-                    // 溜まったデータをWorkerに投げる（メイン側のメモリからは即座に解放候補へ）
-                    const sendType = isFirstTime ? "start" : (rec.state === "inactive" ? "final" : "memo");
-                    worker.postMessage({
-                        audioData: e.data,
-                        type: sendType,
-                        gasUrl: GAS_URL
-                    });
-                    isFirstTime = false;
-                }
-            };
+    rec.ondataavailable = async (e) => {
+    if (e.data.size > 0) {
+        const arrayBuffer = await e.data.arrayBuffer();
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        // 音声データをデコード
+        audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+            const rawData = buffer.getChannelData(0); // 左チャンネルの生データ
+            const sendType = isFirstTime ? "start" : (rec.state === "inactive" ? "final" : "memo");
+            
+            // Workerへ「生の数値データ」を転送（Transferableを使用しメモリを解放）
+            worker.postMessage({
+                audioRawData: rawData.buffer, // Bufferとして送る
+                sampleRate: buffer.sampleRate,
+                type: sendType,
+                gasUrl: GAS_URL
+            }, [rawData.buffer]); 
+            
+            isFirstTime = false;
+        });
+    }
+};
 
             rec.start(); // 録音開始（以後、stopボタンを押すまで止まらない）
 
