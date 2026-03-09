@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>AI議事録レコーダー（安定版）</title>
+    <title>AI議事録レコーダー（Worker版）</title>
     <style>
         body { font-family: sans-serif; text-align: center; padding-top: 50px; background: #f4f7f6; }
         button { font-size: 1.2rem; padding: 15px 30px; margin: 10px; border: none; border-radius: 50px; cursor: pointer; transition: 0.3s; }
@@ -28,6 +28,7 @@
         
         let rec, timer, audioCtx;
         let isFirstTime = true;
+        let isFinalAction = false; // ★追加：停止ボタンが押されたかのフラグ
         const worker = new Worker('worker.js');
         
         const startBtn = document.getElementById('start');
@@ -37,8 +38,11 @@
         worker.onmessage = (e) => {
             const data = e.data;
             if (data.status === 'success') {
-                if (data.result.url && data.type === 'start') {
-                    status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
+                if (data.result.url && (data.type === 'start' || data.type === 'final')) {
+                    // スプレッドシートのリンクを重複させないためにチェック
+                    if (!document.querySelector('.ss-link')) {
+                        status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
+                    }
                 }
                 if (data.type === 'final') {
                     status.innerHTML = "議事録の作成が完了しました。スプレッドシートを確認してください。";
@@ -57,30 +61,34 @@
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 rec = new MediaRecorder(stream);
                 isFirstTime = true;
+                isFinalAction = false;
 
                 rec.ondataavailable = async (e) => {
                     if (e.data.size > 0) {
                         const arrayBuffer = await e.data.arrayBuffer();
-                        // 録音データをデコードして生波形を取り出す
                         audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
                             const floatArray = buffer.getChannelData(0);
-                            const sendType = isFirstTime ? "start" : (rec.state === "inactive" ? "final" : "memo");
                             
-                            // Workerへ転送（Transferable Objectsでメモリを即座に解放）
+                            // ★ここが重要：isFinalActionとrec.stateを組み合わせて正確に判定
+                            let sendType = "memo";
+                            if (isFirstTime) {
+                                sendType = "start";
+                                isFirstTime = false;
+                            } else if (isFinalAction && rec.state === "inactive") {
+                                sendType = "final";
+                            }
+                            
                             worker.postMessage({
                                 floatArray: floatArray,
                                 sampleRate: buffer.sampleRate,
                                 type: sendType,
                                 gasUrl: GAS_URL
                             }, [floatArray.buffer]);
-                            
-                            isFirstTime = false;
                         });
                     }
                 };
 
                 rec.start();
-                // 10分ごとにデータを取り出す（録音は止めない）
                 timer = setInterval(() => {
                     if (rec.state === "recording") rec.requestData();
                 }, 600000); 
@@ -94,12 +102,13 @@
         };
 
         stopBtn.onclick = () => {
+            isFinalAction = true; // ★まずフラグを立てる
             clearInterval(timer);
             if (rec && rec.state !== "inactive") {
                 rec.stop(); // 停止させるとondataavailableが最後の一回呼ばれる
                 rec.stream.getTracks().forEach(track => track.stop());
             }
-            status.innerHTML = "最終データを送信中...<br>議事録の生成が終わるまでこの画面を閉じないでください。";
+            status.innerHTML = "最終データを送信中...<br>議事録の生成が終わるまでお待ちください。";
             stopBtn.disabled = true;
             startBtn.disabled = false;
         };
