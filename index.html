@@ -10,7 +10,7 @@
         #start { background: #4CAF50; color: white; }
         #stop { background: #f44336; color: white; }
         button:disabled { background: #ccc; cursor: not-allowed; }
-        #status { margin-top: 20px; color: #555; font-weight: bold; line-height: 1.6; }
+        #status { margin-top: 20px; color: #555; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -26,45 +26,54 @@
     <script>
         const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
 
-        let rec, chunks = [], timer; 
-        let isFirstTime = true;
-        let isFinalAction = false; // ★追加：停止ボタンが押されたか
-
+        let rec, chunks = [];
+        let timer; 
+        let isFirstTime = true; // ★初回判定用
         const startBtn = document.getElementById('start');
         const stopBtn = document.getElementById('stop');
         const status = document.getElementById('status');
 
         startBtn.onclick = async () => {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                document.getElementById('silent-audio').play(); // 不眠
+                // --- 既存のマイク取得処理 ---
+                const s = await navigator.mediaDevices.getUserMedia({ audio: true });
                 
-                isFirstTime = true;
-                isFinalAction = false;
-
-                const createRecorder = () => {
-                    rec = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-                    chunks = [];
-                    rec.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
-                    
-                    rec.onstop = async () => {
-                        if (chunks.length === 0) return;
-                        const blob = new Blob(chunks, { type: 'audio/webm' });
-                        const sendType = isFirstTime ? "start" : (isFinalAction ? "final" : "memo");
+                // ★追加：無音再生を開始してブラウザを「不眠」にする
+                const silentAudio = document.getElementById('silent-audio');
+                silentAudio.play();
+                rec = new MediaRecorder(s);
+                chunks = [];
+                isFirstTime = true; // 録音開始時にリセット
+                
+                rec.ondataavailable = e => chunks.push(e.data);
+                
+                rec.onstop = async () => {
+                    if (chunks.length > 0) {
+                        const blob = new Blob(chunks, { type: "audio/mpeg" });
                         
+                        // ★状態を判定して送信
+                        let sendType = "memo";
+                        if (isFirstTime) {
+                            sendType = "start";
+                            isFirstTime = false; // 次からは memo になる
+                        }
+                        // もし録音機が完全に止まっていて（stopボタン経由）、タイマーも止まっていたら final
+                        if (rec.state === "inactive" && !timer) {
+                            sendType = "final";
+                        }
+
                         sendToGAS(blob, sendType);
-                        isFirstTime = false;
-                    };
-                    rec.start();
+                        chunks = []; 
+                    }
                 };
 
-                createRecorder();
+                rec.start();
 
-                // 10分（テスト時は 60000 = 1分にする）
+                // 10秒ごとに区切って送信
                 timer = setInterval(() => {
-                    if (rec && rec.state === "recording") {
-                        rec.stop();
-                        createRecorder();
+                    if (rec.state === "recording") {
+                        rec.stop(); 
+                        rec.start(); 
                     }
                 }, 600000); 
 
@@ -76,40 +85,58 @@
             }
         };
 
-        stopBtn.onclick = () => {
-            isFinalAction = true;
-            clearInterval(timer);
-            if (rec && rec.state !== "inactive") {
-                rec.stop();
-                rec.stream.getTracks().forEach(track => track.stop());
-            }
-            status.innerHTML = "最終データを送信しました。<br>スプレッドシートの作成まで暫くお待ちください。"; 
-            stopBtn.disabled = true;
-            startBtn.disabled = false;
-        };
+    stopBtn.onclick = () => {
+        isFinal = true; 
+        clearInterval(timer);
+        timer = null; 
         
-        async function sendToGAS(blob, type) {
-            const reader = new FileReader();
-            reader.readAsDataURL(blob); 
-            reader.onloadend = async () => {
-                const base64Data = reader.result.split(',')[1];
-                const targetUrl = `${GAS_URL}?type=${type}`;
-                try {
-                    const response = await fetch(targetUrl, {
-                        method: "POST",
-                        body: base64Data
-                    });
-                    if (response.ok) {
-                        const data = await response.json();
-                        if (data.url && type === "start") {
-                            status.innerHTML += `<br><a href="${data.url}" target="_blank" style="display:inline-block; margin-top:10px; padding:10px; background:#4285f4; color:white; text-decoration:none; border-radius:5px;">スプレッドシートを開く</a>`;
-                        }
-                    }
-                } catch (e) {
-                    console.error("送信エラー:", e);
-                }
-            };
+        if (rec && rec.state !== "inactive") {
+            rec.stop();
+            const stream = rec.stream;
+            const tracks = stream.getTracks();
+            tracks.forEach(track => track.stop());
         }
+    
+        // ★修正ポイント：ボタン表示を消し、テキストのみにする
+        status.innerHTML = "最終データを送信しました。<br>スプレッドシートの作成まで暫くお待ちください。"; 
+        
+        stopBtn.disabled = true;
+        startBtn.disabled = false;
+    };
+        
+    async function sendToGAS(blob, type) {
+        const reader = new FileReader();
+        reader.readAsDataURL(blob); 
+        reader.onloadend = async () => {
+            const base64Data = reader.result.split(',')[1];
+            // URLパラメータにtypeを付与
+            const targetUrl = `${GAS_URL}?type=${type}`;
+            
+            try {
+                const response = await fetch(targetUrl, {
+                    method: "POST",
+                    mode: "cors", // no-corsからcorsに変更
+                    body: base64Data,
+                    headers: {
+                        // ここはあえて空にするか、Content-Typeを指定しないのがGAS連携のコツです
+                    }
+                });
+    
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log("GASからのレスポンス:", data);
+                    
+                    if (data.url) {
+                        // ステータス欄にリンクを表示
+                        status.innerHTML += `<br><a href="${data.url}" target="_blank" style="display:inline-block; margin-top:10px; padding:10px; background:#4285f4; color:white; text-decoration:none; border-radius:5px;">スプレッドシートを開く</a>`;
+                    }
+                }
+            } catch (e) {
+                // CORSエラーが出る場合は、GAS側の公開設定が「全員（匿名含む）」になっているか再確認
+                console.error("URL取得に失敗しました。CORSエラーの可能性があります:", e);
+            }
+        };
+    }
     </script>
 </body>
 </html>
