@@ -32,8 +32,10 @@ self.onmessage = async (e) => {
 
     // 4. GASへ送信
     const targetUrl = `${gasUrl}?type=${type}`;
+    // worker.js の fetch 部分を修正
     const response = await fetch(targetUrl, {
       method: "POST",
+      mode: "cors", // 明示的に指定
       body: base64Data
     });
 
