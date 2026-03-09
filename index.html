@@ -58,15 +58,27 @@
                 rec = new MediaRecorder(stream);
                 isFirstTime = true;
 
+                // index.html の rec.ondataavailable 部分を差し替え
                 rec.ondataavailable = async (e) => {
                     if (e.data.size > 0) {
-                        const arrayBuffer = await e.data.arrayBuffer();
-                        // 録音データをデコードして生波形を取り出す
-                        audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+                        try {
+                            console.log("データ抽出成功:", e.data.size, "bytes");
+                            const arrayBuffer = await e.data.arrayBuffer();
+                            
+                            // デコード処理（失敗しても次に進めるようtry-catch）
+                            const buffer = await audioCtx.decodeAudioData(arrayBuffer).catch(err => {
+                                console.error("デコードに失敗しました:", err);
+                                return null;
+                            });
+                
+                            if (!buffer) return;
+                
                             const floatArray = buffer.getChannelData(0);
                             const sendType = isFirstTime ? "start" : (rec.state === "inactive" ? "final" : "memo");
                             
-                            // Workerへ転送（Transferable Objectsでメモリを即座に解放）
+                            console.log("Workerへ送信準備中... Type:", sendType);
+                
+                            // Workerへ転送
                             worker.postMessage({
                                 floatArray: floatArray,
                                 sampleRate: buffer.sampleRate,
@@ -75,7 +87,9 @@
                             }, [floatArray.buffer]);
                             
                             isFirstTime = false;
-                        });
+                        } catch (err) {
+                            console.error("ondataavailable内の致命的エラー:", err);
+                        }
                     }
                 };
 
