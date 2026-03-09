@@ -24,82 +24,74 @@
     </audio>
     
     <script>
-        const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
+    const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
+    
+    let rec, timer;
+    let isFirstTime = true;
+    const worker = new Worker('worker.js'); // Workerの起動
+    
+    const startBtn = document.getElementById('start');
+    const stopBtn = document.getElementById('stop');
+    const status = document.getElementById('status');
 
-        let rec, chunks = [];
-        let timer; 
-        let isFirstTime = true; // ★初回判定用
-        const startBtn = document.getElementById('start');
-        const stopBtn = document.getElementById('stop');
-        const status = document.getElementById('status');
-
-        startBtn.onclick = async () => {
-            try {
-                // --- 既存のマイク取得処理 ---
-                const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-                
-                // ★追加：無音再生を開始してブラウザを「不眠」にする
-                const silentAudio = document.getElementById('silent-audio');
-                silentAudio.play();
-                rec = new MediaRecorder(s);
-                chunks = [];
-                isFirstTime = true; // 録音開始時にリセット
-                
-                rec.ondataavailable = e => chunks.push(e.data);
-                
-                rec.onstop = async () => {
-                    if (chunks.length > 0) {
-                        const blob = new Blob(chunks, { type: "audio/mpeg" });
-                        
-                        // ★状態を判定して送信
-                        let sendType = "memo";
-                        if (isFirstTime) {
-                            sendType = "start";
-                            isFirstTime = false; // 次からは memo になる
-                        }
-                        // もし録音機が完全に止まっていて（stopボタン経由）、タイマーも止まっていたら final
-                        if (rec.state === "inactive" && !timer) {
-                            sendType = "final";
-                        }
-
-                        sendToGAS(blob, sendType);
-                        chunks = []; 
-                    }
-                };
-
-                rec.start();
-
-                // 10秒ごとに区切って送信
-                timer = setInterval(() => {
-                    if (rec.state === "recording") {
-                        rec.stop(); 
-                        rec.start(); 
-                    }
-                }, 600000); 
-
-                startBtn.disabled = true;
-                stopBtn.disabled = false;
-                status.innerHTML = "録音中...<br>（10分ごとに自動保存、最後に議事録作成）";
-            } catch (e) {
-                status.innerText = "エラー: マイクにアクセスできません。";
+    // Workerからの返信を受け取った時の処理
+    worker.onmessage = (e) => {
+        const data = e.data;
+        if (data.status === 'success') {
+            if (data.result.url) {
+                status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを確認</a>`;
             }
-        };
+            console.log("保存完了:", data.result);
+        } else {
+            console.error("Workerエラー:", data.error);
+        }
+    };
+
+    startBtn.onclick = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            document.getElementById('silent-audio').play(); // 不眠設定
+            
+            rec = new MediaRecorder(stream);
+            isFirstTime = true;
+            
+            rec.ondataavailable = e => {
+                if (e.data.size > 0) {
+                    // 溜まったデータをWorkerに投げる（メイン側のメモリからは即座に解放候補へ）
+                    const sendType = isFirstTime ? "start" : (rec.state === "inactive" ? "final" : "memo");
+                    worker.postMessage({
+                        audioData: e.data,
+                        type: sendType,
+                        gasUrl: GAS_URL
+                    });
+                    isFirstTime = false;
+                }
+            };
+
+            rec.start(); // 録音開始（以後、stopボタンを押すまで止まらない）
+
+            // 10分ごとに「データだけ」を取り出す（録音は継続！）
+            timer = setInterval(() => {
+                if (rec.state === "recording") {
+                    rec.requestData(); // これが「継ぎ目なし」の鍵
+                }
+            }, 600000); 
+
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            status.innerHTML = "録音中...（連続録音モード：隙間なく記録しています）";
+        } catch (e) {
+            status.innerText = "エラー: マイクにアクセスできません。";
+        }
+    };
 
     stopBtn.onclick = () => {
-        isFinal = true; 
         clearInterval(timer);
-        timer = null; 
-        
         if (rec && rec.state !== "inactive") {
-            rec.stop();
-            const stream = rec.stream;
-            const tracks = stream.getTracks();
-            tracks.forEach(track => track.stop());
+            rec.stop(); // ここで初めて録音が完全停止し、最後のデータが送信される
+            rec.stream.getTracks().forEach(track => track.stop());
         }
-    
-        // ★修正ポイント：ボタン表示を消し、テキストのみにする
-        status.innerHTML = "最終データを送信しました。<br>スプレッドシートの作成まで暫くお待ちください。"; 
-        
+        status.innerHTML = "録音を終了しました。最終データを送信・解析中です...";
         stopBtn.disabled = true;
         startBtn.disabled = false;
     };
