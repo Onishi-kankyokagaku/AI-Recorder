@@ -49,36 +49,30 @@
             }
         };
 
+        // index.html の startBtn.onclick 内を差し替え
         startBtn.onclick = async () => {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 document.getElementById('silent-audio').play();
                 
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                rec = new MediaRecorder(stream);
                 isFirstTime = true;
-
-                // index.html の rec.ondataavailable 部分を差し替え
-                rec.ondataavailable = async (e) => {
-                    if (e.data.size > 0) {
-                        try {
-                            console.log("データ抽出成功:", e.data.size, "bytes");
-                            const arrayBuffer = await e.data.arrayBuffer();
-                            
-                            // デコード処理（失敗しても次に進めるようtry-catch）
-                            const buffer = await audioCtx.decodeAudioData(arrayBuffer).catch(err => {
-                                console.error("デコードに失敗しました:", err);
-                                return null;
-                            });
-                
-                            if (!buffer) return;
-                
+        
+                const startRecording = () => {
+                    rec = new MediaRecorder(stream);
+                    const chunks = [];
+                    
+                    rec.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+                    
+                    rec.onstop = async () => {
+                        const blob = new Blob(chunks, { type: 'audio/webm' });
+                        const arrayBuffer = await blob.arrayBuffer();
+                        
+                        // ここで確実にデコード
+                        audioCtx.decodeAudioData(arrayBuffer).then(buffer => {
                             const floatArray = buffer.getChannelData(0);
-                            const sendType = isFirstTime ? "start" : (rec.state === "inactive" ? "final" : "memo");
+                            const sendType = isFirstTime ? "start" : (isFinal ? "final" : "memo");
                             
-                            console.log("Workerへ送信準備中... Type:", sendType);
-                
-                            // Workerへ転送
                             worker.postMessage({
                                 floatArray: floatArray,
                                 sampleRate: buffer.sampleRate,
@@ -87,11 +81,32 @@
                             }, [floatArray.buffer]);
                             
                             isFirstTime = false;
-                        } catch (err) {
-                            console.error("ondataavailable内の致命的エラー:", err);
-                        }
-                    }
+                        }).catch(err => console.error("デコード失敗:", err));
+                    };
+                    rec.start();
                 };
+        
+                let isFinal = false;
+                startRecording();
+        
+                // 10分ごとに「一旦止めて、すぐ次を開始」
+                timer = setInterval(() => {
+                    if (rec.state === "recording") {
+                        rec.stop(); // 停止させると onstop が走り、Workerへ飛ぶ
+                        startRecording(); // 即座に次の録音を開始
+                    }
+                }, 600000); 
+        
+                // 停止ボタンの挙動も修正
+                stopBtn.onclick = () => {
+                    isFinal = true;
+                    clearInterval(timer);
+                    if (rec && rec.state !== "inactive") rec.stop();
+                    status.innerHTML = "最終データを送信中...";
+                };
+        
+            } catch (err) { alert("マイクエラー: " + err); }
+        };
 
                 rec.start();
                 // 10分ごとにデータを取り出す（録音は止めない）
