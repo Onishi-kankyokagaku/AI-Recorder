@@ -2,142 +2,107 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI議事録レコーダー</title>
+    <title>AI議事録レコーダー（安定版）</title>
     <style>
         body { font-family: sans-serif; text-align: center; padding-top: 50px; background: #f4f7f6; }
         button { font-size: 1.2rem; padding: 15px 30px; margin: 10px; border: none; border-radius: 50px; cursor: pointer; transition: 0.3s; }
         #start { background: #4CAF50; color: white; }
         #stop { background: #f44336; color: white; }
         button:disabled { background: #ccc; cursor: not-allowed; }
-        #status { margin-top: 20px; color: #555; font-weight: bold; }
+        #status { margin-top: 20px; color: #555; font-weight: bold; line-height: 1.6; }
+        .ss-link { display: inline-block; margin-top: 10px; padding: 10px 20px; background: #4285f4; color: white; text-decoration: none; border-radius: 5px; }
     </style>
 </head>
 <body>
     <h1>AI議事録レコーダー</h1>
     <button id="start">● 録音開始</button>
-    <button id="stop" disabled>■ 停止・送信</button>
+    <button id="stop" disabled>■ 停止・議事録作成</button>
     <p id="status">ステータス: 準備完了</p>
-    
+
     <audio id="silent-audio" loop>
         <source src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=" type="audio/wav">
     </audio>
-    
+
     <script>
         const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
-
-        let rec, chunks = [];
-        let timer; 
-        let isFirstTime = true; // ★初回判定用
-        let isFinal = false; // ★この一行を追加してください！
+        
+        let rec, timer, audioCtx;
+        let isFirstTime = true;
+        const worker = new Worker('worker.js');
+        
         const startBtn = document.getElementById('start');
         const stopBtn = document.getElementById('stop');
         const status = document.getElementById('status');
 
+        worker.onmessage = (e) => {
+            const data = e.data;
+            if (data.status === 'success') {
+                if (data.result.url && data.type === 'start') {
+                    status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
+                }
+                if (data.type === 'final') {
+                    status.innerHTML = "議事録の作成が完了しました。スプレッドシートを確認してください。";
+                }
+                console.log("処理成功:", data.result);
+            } else {
+                status.innerHTML += `<br><span style="color:red;">エラー: ${data.error}</span>`;
+            }
+        };
+
         startBtn.onclick = async () => {
             try {
-                // --- 既存のマイク取得処理 ---
-                const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                document.getElementById('silent-audio').play();
                 
-                // ★追加：無音再生を開始してブラウザを「不眠」にする
-                const silentAudio = document.getElementById('silent-audio');
-                silentAudio.play();
-                rec = new MediaRecorder(s);
-                chunks = [];
-                isFirstTime = true; // 録音開始時にリセット
-                
-                rec.ondataavailable = e => chunks.push(e.data);
-                
-                rec.onstop = async () => {
-                    if (chunks.length > 0) {
-                        const blob = new Blob(chunks, { type: "audio/mpeg" });
-                        
-                        // ★状態を判定して送信
-                        let sendType = "memo";
-                        if (isFirstTime) {
-                            sendType = "start";
-                            isFirstTime = false; // 次からは memo になる
-                        }
-                        // もし録音機が完全に止まっていて（stopボタン経由）、タイマーも止まっていたら final
-                        if (rec.state === "inactive" && !timer) {
-                            sendType = "final";
-                        }
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                rec = new MediaRecorder(stream);
+                isFirstTime = true;
 
-                        sendToGAS(blob, sendType);
-                        chunks = []; 
+                rec.ondataavailable = async (e) => {
+                    if (e.data.size > 0) {
+                        const arrayBuffer = await e.data.arrayBuffer();
+                        // 録音データをデコードして生波形を取り出す
+                        audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+                            const floatArray = buffer.getChannelData(0);
+                            const sendType = isFirstTime ? "start" : (rec.state === "inactive" ? "final" : "memo");
+                            
+                            // Workerへ転送（Transferable Objectsでメモリを即座に解放）
+                            worker.postMessage({
+                                floatArray: floatArray,
+                                sampleRate: buffer.sampleRate,
+                                type: sendType,
+                                gasUrl: GAS_URL
+                            }, [floatArray.buffer]);
+                            
+                            isFirstTime = false;
+                        });
                     }
                 };
 
                 rec.start();
-
-                // 10秒ごとに区切って送信
+                // 10分ごとにデータを取り出す（録音は止めない）
                 timer = setInterval(() => {
-                    if (rec.state === "recording") {
-                        rec.stop(); 
-                        rec.start(); 
-                    }
+                    if (rec.state === "recording") rec.requestData();
                 }, 600000); 
 
                 startBtn.disabled = true;
                 stopBtn.disabled = false;
-                status.innerHTML = "録音中...<br>（10分ごとに自動保存、最後に議事録作成）";
-            } catch (e) {
-                status.innerText = "エラー: マイクにアクセスできません。";
+                status.innerHTML = "録音中...<br>（隙間なく連続録音しています。10分ごとに自動保存）";
+            } catch (err) {
+                status.innerText = "エラー: マイクにアクセスできません。" + err;
             }
         };
 
-    stopBtn.onclick = () => {
-        isFinal = true; 
-        clearInterval(timer);
-        timer = null; 
-        
-        if (rec && rec.state !== "inactive") {
-            rec.stop();
-            const stream = rec.stream;
-            const tracks = stream.getTracks();
-            tracks.forEach(track => track.stop());
-        }
-    
-        // ★修正ポイント：ボタン表示を消し、テキストのみにする
-        status.innerHTML = "最終データを送信しました。<br>スプレッドシートの作成まで暫くお待ちください。"; 
-        
-        stopBtn.disabled = true;
-        startBtn.disabled = false;
-    };
-        
-    async function sendToGAS(blob, type) {
-        const reader = new FileReader();
-        reader.readAsDataURL(blob); 
-        reader.onloadend = async () => {
-            const base64Data = reader.result.split(',')[1];
-            // URLパラメータにtypeを付与
-            const targetUrl = `${GAS_URL}?type=${type}`;
-            
-            try {
-                const response = await fetch(targetUrl, {
-                    method: "POST",
-                    mode: "cors", // no-corsからcorsに変更
-                    body: base64Data,
-                    headers: {
-                        // ここはあえて空にするか、Content-Typeを指定しないのがGAS連携のコツです
-                    }
-                });
-    
-                if (response.ok) {
-                    const data = await response.json();
-                    console.log("GASからのレスポンス:", data);
-                    
-                    if (data.url) {
-                        // ステータス欄にリンクを表示
-                        status.innerHTML += `<br><a href="${data.url}" target="_blank" style="display:inline-block; margin-top:10px; padding:10px; background:#4285f4; color:white; text-decoration:none; border-radius:5px;">スプレッドシートを開く</a>`;
-                    }
-                }
-            } catch (e) {
-                // CORSエラーが出る場合は、GAS側の公開設定が「全員（匿名含む）」になっているか再確認
-                console.error("URL取得に失敗しました。CORSエラーの可能性があります:", e);
+        stopBtn.onclick = () => {
+            clearInterval(timer);
+            if (rec && rec.state !== "inactive") {
+                rec.stop(); // 停止させるとondataavailableが最後の一回呼ばれる
+                rec.stream.getTracks().forEach(track => track.stop());
             }
+            status.innerHTML = "最終データを送信中...<br>議事録の生成が終わるまでこの画面を閉じないでください。";
+            stopBtn.disabled = true;
+            startBtn.disabled = false;
         };
-    }
     </script>
 </body>
 </html>
