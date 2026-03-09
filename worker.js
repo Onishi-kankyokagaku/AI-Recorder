@@ -33,16 +33,21 @@ self.onmessage = async (e) => {
     // 4. GASへ送信
     const targetUrl = `${gasUrl}?type=${type}`;
     // worker.js の fetch 部分を修正
+    // worker.js の fetch 部分周辺を強化
     const response = await fetch(targetUrl, {
       method: "POST",
-      mode: "cors", // 明示的に指定
+      mode: "cors",
       body: base64Data
+    }).catch(err => {
+      throw new Error("GASへの通信に失敗しました: " + err.message);
     });
-
+    
+    if (!response.ok) {
+      throw new Error("GASがエラーを返しました: " + response.status);
+    }
+    
     const result = await response.json();
+    console.log("Worker: GASからの応答を受信", result);
     self.postMessage({ status: 'success', result, type });
-
-  } catch (err) {
-    self.postMessage({ status: 'error', error: err.toString() });
   }
 };
