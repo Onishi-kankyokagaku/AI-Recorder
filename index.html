@@ -26,114 +26,114 @@
 <script>
         const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
         
+        // 1. 変数をすべて一番上に宣言（これが一番大事！）
+        let currentSsId = null; 
+        let rec = null;
+        let timer = null;
+        let audioCtx = null;
+        let isFirstTime = true;
+        let isFinalAction = false;
+        let worker = null;
+
         const status = document.getElementById('status');
         const startBtn = document.getElementById('start');
         const stopBtn = document.getElementById('stop');
 
-        // 画面にログを表示する関数
         function log(msg) {
             console.log(msg);
             status.innerHTML += `<br><span style="color:blue;font-size:0.8rem;">[Log] ${msg}</span>`;
         }
 
-        let currentSsId = null; 
-        let rec, timer, audioCtx;
-        let isFirstTime = true;
-        let isFinalAction = false;
-        
-        log("プログラム読み込み完了");
-
-        let worker;
+        // 2. Workerの初期化
         try {
             worker = new Worker('worker.js');
-            log("Worker起動成功");
+            log("Worker準備OK");
         } catch(e) {
-            log("Worker起動失敗: " + e.message);
+            log("Worker作成失敗: " + e.message);
         }
 
-worker.onmessage = (e) => {
+        worker.onmessage = (e) => {
             const data = e.data;
-            // GASからの生の結果を表示
+            log(`GAS応答: ${data.type} / ${data.result.message}`);
             if (data.status === 'success') {
-                log(`GAS成功: Type=${data.type} / Msg=${data.result.message}`);
-                
-                if (data.result.ssId) {
-                    currentSsId = data.result.ssId;
-                }
+                if (data.result.ssId) currentSsId = data.result.ssId;
                 if (data.result.url && (data.type === 'start' || data.type === 'final')) {
-                    if (!document.querySelector('.ss-link')) {
-                        status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
-                    }
+                    status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
                 }
-                if (data.type === 'final') {
-                    log("議事録作成プロセス完了（GAS側の応答を確認してください）");
-                    status.innerHTML = "<strong>すべての処理が完了しました。</strong>";
-                    currentSsId = null; 
-                }
-            } else {
-                log(`GASエラー [${data.type}]: ${data.error}`);
             }
         };
 
-const startSegment = async (stream) => {
+        // 3. 録音処理の本体
+        const startSegment = async (stream) => {
+            log("録音セグメント開始...");
             let chunks = [];
             rec = new MediaRecorder(stream);
             rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
             
             rec.onstop = async () => {
-                // ★ 判定ロジックの優先順位を整理
-                let sendType = "memo";
-                if (isFinalAction) {
-                    sendType = "final"; // 停止ボタンが押されたら最優先
-                } else if (isFirstTime) {
-                    sendType = "start"; // 初回のみ
-                }
+                // 送信タイプの判定（isFinalActionを最優先）
+                let sendType = isFinalAction ? "final" : (isFirstTime ? "start" : "memo");
+                log(`判定タイプ: ${sendType}`);
                 
-                log(`送信判定結果: ${sendType} (初回フラグ:${isFirstTime})`); 
-
-                if (chunks.length === 0) { log("データ空のため終了"); return; }
-                
+                if (chunks.length === 0) { log("データなし"); return; }
                 const blob = new Blob(chunks, { type: 'audio/webm' });
                 const arrayBuffer = await blob.arrayBuffer();
                 
                 if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                
                 audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
-                    log(`${sendType} 送信開始...`);
+                    log(`${sendType} 送信中...`);
                     const floatArray = buffer.getChannelData(0);
-                    
                     worker.postMessage({
                         floatArray: floatArray,
                         sampleRate: buffer.sampleRate,
-                        type: sendType, 
+                        type: sendType,
                         gasUrl: GAS_URL,
                         ssId: currentSsId
                     }, [floatArray.buffer]);
                     
-                    // ★ 送信指示を出した直後に、初回フラグを確実にオフにする
-                    isFirstTime = false; 
-
-                    if (!isFinalAction) {
-                        log("次のセグメントを開始します");
-                        startSegment(stream);
-                    } else {
-                        log("最終データの送信を指示しました");
-                    }
-                }, (err) => log("音声解析失敗: " + err));
+                    isFirstTime = false; // 送信後にフラグ折る
+                    if (!isFinalAction) startSegment(stream);
+                });
             };
             rec.start();
         };
 
+        // 4. ボタンイベント（ここが動かない原因だった可能性大）
+        startBtn.onclick = async () => {
+            log("●開始ボタンがクリックされました"); // これが出ないならボタン取得ミス
+            try {
+                // 状態をリセット
+                isFirstTime = true;
+                isFinalAction = false;
+                
+                log("マイク許可を求めています...");
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                log("マイク許可OK");
+
+                document.getElementById('silent-audio').play();
+                startSegment(stream);
+
+                timer = setInterval(() => {
+                    if (rec && rec.state === "recording") rec.stop();
+                }, 600000); 
+
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                status.innerHTML = "録音中...";
+            } catch (err) {
+                log("開始エラー: " + err.message);
+            }
+        };
+
         stopBtn.onclick = () => {
-            log("■ 停止ボタン押下");
-            isFinalAction = true; // ★先にフラグを立てる！
+            log("■停止ボタンがクリックされました");
+            isFinalAction = true;
             clearInterval(timer);
-            
             if (rec && rec.state !== "inactive") {
-                rec.stop(); // これで上の onstop が発火し、sendType が final になります
+                rec.stop();
                 rec.stream.getTracks().forEach(track => track.stop());
             }
-            status.innerHTML = "最終データを送信中...<br>AIが議事録を作成しています。";
+            status.innerHTML = "最終データを送信中...";
             stopBtn.disabled = true;
         };
     </script>
