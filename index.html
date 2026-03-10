@@ -23,91 +23,86 @@
         <source src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=" type="audio/wav">
     </audio>
 
-    <script>
+<script>
         const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
-        let currentSsId = null; // ★これを忘れるとエラーになります！
+        
+        // 1. 全ての変数を最初に宣言する
+        let currentSsId = null; 
         let rec, timer, audioCtx;
         let isFirstTime = true;
         let isFinalAction = false;
-        
         const worker = new Worker('worker.js');
-        
+
+        // 2. HTML要素を取得する
         const startBtn = document.getElementById('start');
         const stopBtn = document.getElementById('stop');
         const status = document.getElementById('status');
 
-    worker.onmessage = (e) => {
-        const data = e.data;
-        if (data.status === 'success') {
-            // --- 修正ポイント：GASから届いたSSのIDを記憶する ---
-            if (data.result.ssId) {
-                currentSsId = data.result.ssId; 
-            }
-    
-            if (data.result.url && (data.type === 'start' || data.type === 'final')) {
-                if (!document.querySelector('.ss-link')) {
-                    status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
+        // 3. Workerからの返信を待機する設定
+        worker.onmessage = (e) => {
+            const data = e.data;
+            if (data.status === 'success') {
+                if (data.result.ssId) {
+                    currentSsId = data.result.ssId; 
                 }
+                if (data.result.url && (data.type === 'start' || data.type === 'final')) {
+                    if (!document.querySelector('.ss-link')) {
+                        status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
+                    }
+                }
+                if (data.type === 'final') {
+                    status.innerHTML = "議事録の作成が完了しました。";
+                    currentSsId = null; 
+                }
+                console.log("Worker完了:", data.type, "SS ID:", currentSsId);
+            } else {
+                status.innerHTML += `<br><span style="color:red;">Error: ${data.error}</span>`;
             }
-            if (data.type === 'final') {
-                status.innerHTML = "議事録の作成が完了しました。";
-                currentSsId = null; // 終わったらリセット
-            }
-            console.log("Worker完了:", data.type, "SS ID:", currentSsId);
-        } else {
-            status.innerHTML += `<br><span style="color:red;">Error: ${data.error}</span>`;
-        }
-    };
+        };
 
-        // 録音の1区切り（セグメント）を処理する関数
+        // 4. 録音セグメント処理
         const startSegment = async (stream) => {
             let chunks = [];
             rec = new MediaRecorder(stream);
-            
             rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-            
             rec.onstop = async () => {
                 if (chunks.length === 0) return;
                 const blob = new Blob(chunks, { type: 'audio/webm' });
                 const arrayBuffer = await blob.arrayBuffer();
                 
-                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                // AudioContextの作成（既存のものがあれば再利用）
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                
                 audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
                     const floatArray = buffer.getChannelData(0);
-                    // 1回目ならstart、停止ボタン押下後ならfinal、それ以外はmemo
                     const sendType = isFirstTime ? "start" : (isFinalAction ? "final" : "memo");
                     
                     worker.postMessage({
                         floatArray: floatArray,
                         sampleRate: buffer.sampleRate,
                         type: sendType,
-                        gasUrl: GAS_URL
-                        ssId: currentSsId // ★ここもしっかり追加しましょう
+                        gasUrl: GAS_URL,
+                        ssId: currentSsId // 保持しているIDを渡す
                     }, [floatArray.buffer]);
                     
                     isFirstTime = false;
-                    // 停止ボタンが押されていないなら、次の10分を開始
                     if (!isFinalAction) startSegment(stream);
                 });
             };
             rec.start();
         };
 
-            startBtn.onclick = async () => {
+        // 5. ボタンクリックイベント
+        startBtn.onclick = async () => {
             try {
+                // マイク使用許可を取得
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                
-                // ★ ここで一度だけ作成し、再利用する（もし未作成なら作る）
-                if (!audioCtx) {
-                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                }
                 document.getElementById('silent-audio').play();
                 
                 isFirstTime = true;
                 isFinalAction = false;
                 startSegment(stream);
 
-                // 10分（600000ms）ごとに録音を一旦止めて、次のセグメントへ
                 timer = setInterval(() => {
                     if (rec && rec.state === "recording") rec.stop();
                 }, 600000); 
@@ -117,18 +112,19 @@
                 status.innerHTML = "録音中...（10分ごとに自動保存・Worker処理中）";
             } catch (err) {
                 status.innerText = "エラー: " + err;
+                console.error("録音開始エラー:", err);
             }
         };
 
         stopBtn.onclick = () => {
-        isFinalAction = true; // これが重要！
-        clearInterval(timer);
-        if (rec && rec.state !== "inactive") {
-            rec.stop(); // これで onstop が走り、GASに "final" が飛びます
-            rec.stream.getTracks().forEach(track => track.stop());
-        }
-        status.innerHTML = "最終データを送信中...<br>AIが議事録を作成しています。";
-        stopBtn.disabled = true;
+            isFinalAction = true;
+            clearInterval(timer);
+            if (rec && rec.state !== "inactive") {
+                rec.stop();
+                rec.stream.getTracks().forEach(track => track.stop());
+            }
+            status.innerHTML = "最終データを送信中...<br>AIが議事録を作成しています。";
+            stopBtn.disabled = true;
         };
     </script>
 </body>
