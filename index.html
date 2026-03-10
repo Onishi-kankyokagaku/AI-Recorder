@@ -75,15 +75,18 @@ worker.onmessage = (e) => {
             }
         };
 
+// --- 修正：startSegment の中を少し書き換えます ---
         const startSegment = async (stream) => {
             let chunks = [];
             rec = new MediaRecorder(stream);
             rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+            
             rec.onstop = async () => {
-                const sendType = isFirstTime ? "start" : (isFinalAction ? "final" : "memo");
-                log(`データ処理中... 送信タイプ: ${sendType}`); // ここでタイプを確認！
-                
-                if (chunks.length === 0) { log("データが空です"); return; }
+                // ★ ここで「今、停止ボタンが押されているか」を再確認
+                const sendType = isFinalAction ? "final" : (isFirstTime ? "start" : "memo");
+                log(`送信準備: ${sendType}`); 
+
+                if (chunks.length === 0) { log("空データのため送信スキップ"); return; }
                 
                 const blob = new Blob(chunks, { type: 'audio/webm' });
                 const arrayBuffer = await blob.arrayBuffer();
@@ -91,61 +94,39 @@ worker.onmessage = (e) => {
                 if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 
                 audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
-                    log(`${sendType} データをWorkerへ送信中...`);
+                    log(`${sendType} 送信開始...`);
                     const floatArray = buffer.getChannelData(0);
                     
                     worker.postMessage({
                         floatArray: floatArray,
                         sampleRate: buffer.sampleRate,
-                        type: sendType,
+                        type: sendType, // ★確実に final が渡るように
                         gasUrl: GAS_URL,
                         ssId: currentSsId
                     }, [floatArray.buffer]);
                     
                     isFirstTime = false;
-                    if (!isFinalAction) startSegment(stream);
-                }, (err) => log("音声デコードエラー: " + err));
+                    // 停止ボタンが押されていない場合のみ、次の録音を開始
+                    if (!isFinalAction) {
+                        startSegment(stream);
+                    } else {
+                        log("最終セグメント送信完了。次の録音は行いません。");
+                    }
+                }, (err) => log("音声解析失敗: " + err));
             };
             rec.start();
         };
 
-        startBtn.onclick = async () => {
-            log("録音ボタンが押されました");
-            try {
-                log("マイク権限をリクエスト中...");
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                log("マイク許可されました");
-
-                document.getElementById('silent-audio').play();
-                
-                isFirstTime = true;
-                isFinalAction = false;
-                startSegment(stream);
-
-                timer = setInterval(() => {
-                    if (rec && rec.state === "recording") {
-                        log("10分経過、自動区切り実行");
-                        rec.stop();
-                    }
-                }, 600000); 
-
-                startBtn.disabled = true;
-                stopBtn.disabled = false;
-                status.innerHTML = "録音中...";
-            } catch (err) {
-                log("開始エラー: " + err.name + ": " + err.message);
-            }
-        };
-
         stopBtn.onclick = () => {
-            log("停止ボタンが押されました");
-            isFinalAction = true;
+            log("■ 停止ボタン押下");
+            isFinalAction = true; // ★先にフラグを立てる！
             clearInterval(timer);
+            
             if (rec && rec.state !== "inactive") {
-                rec.stop();
+                rec.stop(); // これで上の onstop が発火し、sendType が final になります
                 rec.stream.getTracks().forEach(track => track.stop());
             }
-            status.innerHTML = "最終データを送信中...";
+            status.innerHTML = "最終データを送信中...<br>AIが議事録を作成しています。";
             stopBtn.disabled = true;
         };
     </script>
