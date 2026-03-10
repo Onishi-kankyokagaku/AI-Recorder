@@ -108,14 +108,14 @@
         };
 
         stopBtn.onclick = () => {
-            isFinalAction = true;
-            clearInterval(timer);
-            if (rec && rec.state !== "inactive") {
-                rec.stop(); // これにより最後のonstopが走り、type="final"が送られる
-                rec.stream.getTracks().forEach(track => track.stop());
-            }
-            status.innerHTML = "最終データを送信中...<br>議事録を作成しています。";
-            stopBtn.disabled = true;
+        isFinalAction = true; // これが重要！
+        clearInterval(timer);
+        if (rec && rec.state !== "inactive") {
+            rec.stop(); // これで onstop が走り、GASに "final" が飛びます
+            rec.stream.getTracks().forEach(track => track.stop());
+        }
+        status.innerHTML = "最終データを送信中...<br>AIが議事録を作成しています。";
+        stopBtn.disabled = true;
         };
     </script>
 </body>
