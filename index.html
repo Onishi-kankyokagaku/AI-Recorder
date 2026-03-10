@@ -75,18 +75,23 @@ worker.onmessage = (e) => {
             }
         };
 
-// --- 修正：startSegment の中を少し書き換えます ---
-        const startSegment = async (stream) => {
+const startSegment = async (stream) => {
             let chunks = [];
             rec = new MediaRecorder(stream);
             rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
             
             rec.onstop = async () => {
-                // ★ ここで「今、停止ボタンが押されているか」を再確認
-                const sendType = isFinalAction ? "final" : (isFirstTime ? "start" : "memo");
-                log(`送信準備: ${sendType}`); 
+                // ★ 判定ロジックの優先順位を整理
+                let sendType = "memo";
+                if (isFinalAction) {
+                    sendType = "final"; // 停止ボタンが押されたら最優先
+                } else if (isFirstTime) {
+                    sendType = "start"; // 初回のみ
+                }
+                
+                log(`送信判定結果: ${sendType} (初回フラグ:${isFirstTime})`); 
 
-                if (chunks.length === 0) { log("空データのため送信スキップ"); return; }
+                if (chunks.length === 0) { log("データ空のため終了"); return; }
                 
                 const blob = new Blob(chunks, { type: 'audio/webm' });
                 const arrayBuffer = await blob.arrayBuffer();
@@ -100,17 +105,19 @@ worker.onmessage = (e) => {
                     worker.postMessage({
                         floatArray: floatArray,
                         sampleRate: buffer.sampleRate,
-                        type: sendType, // ★確実に final が渡るように
+                        type: sendType, 
                         gasUrl: GAS_URL,
                         ssId: currentSsId
                     }, [floatArray.buffer]);
                     
-                    isFirstTime = false;
-                    // 停止ボタンが押されていない場合のみ、次の録音を開始
+                    // ★ 送信指示を出した直後に、初回フラグを確実にオフにする
+                    isFirstTime = false; 
+
                     if (!isFinalAction) {
+                        log("次のセグメントを開始します");
                         startSegment(stream);
                     } else {
-                        log("最終セグメント送信完了。次の録音は行いません。");
+                        log("最終データの送信を指示しました");
                     }
                 }, (err) => log("音声解析失敗: " + err));
             };
