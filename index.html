@@ -29,6 +29,7 @@
         let rec, timer, audioCtx;
         let isFirstTime = true;
         let isFinalAction = false;
+        let currentSsId = null; // ★これを忘れるとエラーになります！
         const worker = new Worker('worker.js');
         
         const startBtn = document.getElementById('start');
