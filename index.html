@@ -10,18 +10,23 @@
             padding: 40px 15px; 
             background: #f4f7f6; 
             margin: 0 auto;       /* ★追加：左右の余白を自動にして中央へ */
-            max-width: 400px;     /* ★追加：画面の最大幅を500px（スマホの横幅くらい）に制限 */
+            max-width: 500px;     /* ★追加：画面の最大幅を500px（スマホの横幅くらい）に制限 */
         }
         
         #version-tag { 
-            position: absolute; 
-            top: 10px; 
-            right: 15px; 
-            font-size: 0.8rem; 
-            color: #777;
+            text-align: right;    /* 右寄せにする */
+            font-size: 0.7rem; 
+            color: #999;
             background: #eee;
             padding: 2px 8px;
             border-radius: 10px;
+            display: inline-block; /* 幅を文字分だけにする */
+        }
+        
+        /* バージョンを囲む親要素（右に寄せるため） */
+        .ver-container {
+            text-align: right;
+            margin-bottom: 10px;
         }
         
         h1 { font-size: 1.5rem; color: #333; margin-bottom: 30px; }
