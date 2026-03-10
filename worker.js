@@ -1,9 +1,11 @@
 importScripts('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.all.min.js');
 
 self.onmessage = async (e) => {
-    const { floatArray, sampleRate, type, gasUrl } = e.data;
+    // ssId を受け取れるように展開
+    const { floatArray, sampleRate, type, gasUrl, ssId } = e.data;
 
     try {
+        // --- 音声エンコード処理 (変更なし) ---
         const samples = new Int16Array(floatArray.length);
         for (let i = 0; i < floatArray.length; i++) {
             samples[i] = floatArray[i] < 0 ? floatArray[i] * 0x8000 : floatArray[i] * 0x7FFF;
@@ -25,7 +27,13 @@ self.onmessage = async (e) => {
         const reader = new FileReaderSync();
         const base64Data = reader.readAsDataURL(mp3Blob).split(',')[1];
 
-        const targetUrl = `${gasUrl}?type=${type}`;
+        // --- GASへの送信処理 (ssIdを追加) ---
+        // ssIdがある場合はURLパラメータに付与する
+        let targetUrl = `${gasUrl}?type=${type}`;
+        if (ssId) {
+            targetUrl += `&ssId=${encodeURIComponent(ssId)}`;
+        }
+
         const response = await fetch(targetUrl, {
             method: "POST",
             body: base64Data,
@@ -35,7 +43,10 @@ self.onmessage = async (e) => {
         if (!response.ok) throw new Error("GAS HTTP Error: " + response.status);
         
         const result = await response.json();
+        
+        // メインスレッドに結果を返す（ここで返ってきたssIdをメイン側が記憶する）
         self.postMessage({ status: 'success', result, type });
+
     } catch (err) {
         self.postMessage({ status: 'error', error: err.message, type });
     }
