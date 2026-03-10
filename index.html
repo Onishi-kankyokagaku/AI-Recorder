@@ -51,34 +51,38 @@
             log("Worker起動失敗: " + e.message);
         }
 
-        worker.onmessage = (e) => {
+worker.onmessage = (e) => {
             const data = e.data;
-            log(`Workerから受信: ${data.type} (${data.status})`);
-            
+            // GASからの生の結果を表示
             if (data.status === 'success') {
+                log(`GAS成功: Type=${data.type} / Msg=${data.result.message}`);
+                
                 if (data.result.ssId) {
                     currentSsId = data.result.ssId;
-                    log("SS IDを保存しました");
                 }
                 if (data.result.url && (data.type === 'start' || data.type === 'final')) {
-                    status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
+                    if (!document.querySelector('.ss-link')) {
+                        status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
+                    }
                 }
                 if (data.type === 'final') {
-                    status.innerHTML = "<strong>議事録の作成が完了しました。</strong>";
+                    log("議事録作成プロセス完了（GAS側の応答を確認してください）");
+                    status.innerHTML = "<strong>すべての処理が完了しました。</strong>";
                     currentSsId = null; 
                 }
             } else {
-                log("エラー発生: " + data.error);
+                log(`GASエラー [${data.type}]: ${data.error}`);
             }
         };
 
         const startSegment = async (stream) => {
-            log("セグメント開始...");
             let chunks = [];
             rec = new MediaRecorder(stream);
             rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
             rec.onstop = async () => {
-                log("録音停止、データ処理中...");
+                const sendType = isFirstTime ? "start" : (isFinalAction ? "final" : "memo");
+                log(`データ処理中... 送信タイプ: ${sendType}`); // ここでタイプを確認！
+                
                 if (chunks.length === 0) { log("データが空です"); return; }
                 
                 const blob = new Blob(chunks, { type: 'audio/webm' });
@@ -87,9 +91,8 @@
                 if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 
                 audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
-                    log("音声デコード完了、Workerへ送信");
+                    log(`${sendType} データをWorkerへ送信中...`);
                     const floatArray = buffer.getChannelData(0);
-                    const sendType = isFirstTime ? "start" : (isFinalAction ? "final" : "memo");
                     
                     worker.postMessage({
                         floatArray: floatArray,
@@ -101,10 +104,9 @@
                     
                     isFirstTime = false;
                     if (!isFinalAction) startSegment(stream);
-                }, (err) => log("デコードエラー: " + err));
+                }, (err) => log("音声デコードエラー: " + err));
             };
             rec.start();
-            log("MediaRecorder動作中...");
         };
 
         startBtn.onclick = async () => {
