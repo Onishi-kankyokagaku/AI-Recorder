@@ -3,17 +3,72 @@
 <head>
     <meta charset="UTF-8">
     <title>AI議事録レコーダー</title>
-    <style>
-        body { font-family: sans-serif; text-align: center; padding-top: 30px; background: #f4f7f6; position: relative; }
-        /* 右上にバージョンを表示するスタイル */
-        #version-tag { position: absolute; top: 10px; right: 10px; font-size: 0.7rem; color: #999; }
+<style>
+        body { 
+            font-family: sans-serif; 
+            text-align: center; 
+            padding: 50px 20px; 
+            background: #f4f7f6; 
+        }
         
-        button { font-size: 1.2rem; padding: 15px 30px; margin: 10px; border: none; border-radius: 50px; cursor: pointer; transition: 0.3s; }
-        #start { background: #4CAF50; color: white; }
-        #stop { background: #f44336; color: white; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
-        #status { margin-top: 20px; color: #555; font-weight: bold; line-height: 1.6; }
-        .ss-link { display: inline-block; margin-top: 10px; padding: 10px 20px; background: #4285f4; color: white; text-decoration: none; border-radius: 5px; }
+        #version-tag { 
+            position: absolute; 
+            top: 10px; 
+            right: 15px; 
+            font-size: 0.8rem; 
+            color: #777;
+            background: #eee;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+        
+        h1 { font-size: 1.5rem; color: #333; margin-bottom: 30px; }
+
+        /* ボタンの基本設定 */
+        button { 
+            font-size: 1.2rem; 
+            padding: 20px; 
+            margin: 10px 0; /* 上下に余白 */
+            border: none; 
+            border-radius: 12px; 
+            cursor: pointer; 
+            transition: 0.3s;
+            width: 100%; /* 基本は幅いっぱい */
+            max-width: 400px; /* パソコンでは広がりすぎないように */
+            display: block;
+            margin-left: auto;
+            margin-right: auto;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        #start { background: #4CAF50; color: white; font-weight: bold; }
+        #stop { background: #f44336; color: white; font-weight: bold; }
+        button:active { transform: translateY(2px); box-shadow: none; }
+        button:disabled { background: #ccc; cursor: not-allowed; box-shadow: none; }
+
+        #status { 
+            margin-top: 30px; 
+            color: #555; 
+            font-size: 0.9rem;
+            line-height: 1.6; 
+            word-wrap: break-word; /* 長いURLも折り返す */
+            text-align: left; /* ログは見やすく左寄せ */
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid #ddd;
+        }
+
+        .ss-link { 
+            display: block; 
+            margin-top: 15px; 
+            padding: 15px; 
+            background: #4285f4; 
+            color: white; 
+            text-decoration: none; 
+            border-radius: 8px; 
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
