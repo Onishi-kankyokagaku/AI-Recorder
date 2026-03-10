@@ -82,6 +82,7 @@
                         sampleRate: buffer.sampleRate,
                         type: sendType,
                         gasUrl: GAS_URL
+                        ssId: currentSsId // ★ここもしっかり追加しましょう
                     }, [floatArray.buffer]);
                     
                     isFirstTime = false;
