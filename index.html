@@ -25,11 +25,11 @@
 
     <script>
         const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
-        
+        let currentSsId = null; // ★これを忘れるとエラーになります！
         let rec, timer, audioCtx;
         let isFirstTime = true;
         let isFinalAction = false;
-        let currentSsId = null; // ★これを忘れるとエラーになります！
+        
         const worker = new Worker('worker.js');
         
         const startBtn = document.getElementById('start');
