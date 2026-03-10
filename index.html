@@ -35,22 +35,28 @@
         const stopBtn = document.getElementById('stop');
         const status = document.getElementById('status');
 
-        worker.onmessage = (e) => {
-            const data = e.data;
-            if (data.status === 'success') {
-                if (data.result.url && (data.type === 'start' || data.type === 'final')) {
-                    if (!document.querySelector('.ss-link')) {
-                        status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
-                    }
-                }
-                if (data.type === 'final') {
-                    status.innerHTML = "議事録の作成が完了しました。";
-                }
-                console.log("Worker完了:", data.type);
-            } else {
-                status.innerHTML += `<br><span style="color:red;">Error: ${data.error}</span>`;
+    worker.onmessage = (e) => {
+        const data = e.data;
+        if (data.status === 'success') {
+            // --- 修正ポイント：GASから届いたSSのIDを記憶する ---
+            if (data.result.ssId) {
+                currentSsId = data.result.ssId; 
             }
-        };
+    
+            if (data.result.url && (data.type === 'start' || data.type === 'final')) {
+                if (!document.querySelector('.ss-link')) {
+                    status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
+                }
+            }
+            if (data.type === 'final') {
+                status.innerHTML = "議事録の作成が完了しました。";
+                currentSsId = null; // 終わったらリセット
+            }
+            console.log("Worker完了:", data.type, "SS ID:", currentSsId);
+        } else {
+            status.innerHTML += `<br><span style="color:red;">Error: ${data.error}</span>`;
+        }
+    };
 
         // 録音の1区切り（セグメント）を処理する関数
         const startSegment = async (stream) => {
