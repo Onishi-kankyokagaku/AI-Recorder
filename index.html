@@ -26,54 +26,68 @@
 <script>
         const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
         
-        // 1. 全ての変数を最初に宣言する
+        const status = document.getElementById('status');
+        const startBtn = document.getElementById('start');
+        const stopBtn = document.getElementById('stop');
+
+        // 画面にログを表示する関数
+        function log(msg) {
+            console.log(msg);
+            status.innerHTML += `<br><span style="color:blue;font-size:0.8rem;">[Log] ${msg}</span>`;
+        }
+
         let currentSsId = null; 
         let rec, timer, audioCtx;
         let isFirstTime = true;
         let isFinalAction = false;
-        const worker = new Worker('worker.js');
+        
+        log("プログラム読み込み完了");
 
-        // 2. HTML要素を取得する
-        const startBtn = document.getElementById('start');
-        const stopBtn = document.getElementById('stop');
-        const status = document.getElementById('status');
+        let worker;
+        try {
+            worker = new Worker('worker.js');
+            log("Worker起動成功");
+        } catch(e) {
+            log("Worker起動失敗: " + e.message);
+        }
 
-        // 3. Workerからの返信を待機する設定
         worker.onmessage = (e) => {
             const data = e.data;
+            log(`Workerから受信: ${data.type} (${data.status})`);
+            
             if (data.status === 'success') {
                 if (data.result.ssId) {
-                    currentSsId = data.result.ssId; 
+                    currentSsId = data.result.ssId;
+                    log("SS IDを保存しました");
                 }
                 if (data.result.url && (data.type === 'start' || data.type === 'final')) {
-                    if (!document.querySelector('.ss-link')) {
-                        status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
-                    }
+                    status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
                 }
                 if (data.type === 'final') {
-                    status.innerHTML = "議事録の作成が完了しました。";
+                    status.innerHTML = "<strong>議事録の作成が完了しました。</strong>";
                     currentSsId = null; 
                 }
-                console.log("Worker完了:", data.type, "SS ID:", currentSsId);
             } else {
-                status.innerHTML += `<br><span style="color:red;">Error: ${data.error}</span>`;
+                log("エラー発生: " + data.error);
             }
         };
 
-        // 4. 録音セグメント処理
         const startSegment = async (stream) => {
+            log("セグメント開始...");
             let chunks = [];
             rec = new MediaRecorder(stream);
             rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
             rec.onstop = async () => {
-                if (chunks.length === 0) return;
+                log("録音停止、データ処理中...");
+                if (chunks.length === 0) { log("データが空です"); return; }
+                
                 const blob = new Blob(chunks, { type: 'audio/webm' });
                 const arrayBuffer = await blob.arrayBuffer();
                 
-                // AudioContextの作成（既存のものがあれば再利用）
                 if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 
                 audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+                    log("音声デコード完了、Workerへ送信");
                     const floatArray = buffer.getChannelData(0);
                     const sendType = isFirstTime ? "start" : (isFinalAction ? "final" : "memo");
                     
@@ -82,21 +96,24 @@
                         sampleRate: buffer.sampleRate,
                         type: sendType,
                         gasUrl: GAS_URL,
-                        ssId: currentSsId // 保持しているIDを渡す
+                        ssId: currentSsId
                     }, [floatArray.buffer]);
                     
                     isFirstTime = false;
                     if (!isFinalAction) startSegment(stream);
-                });
+                }, (err) => log("デコードエラー: " + err));
             };
             rec.start();
+            log("MediaRecorder動作中...");
         };
 
-        // 5. ボタンクリックイベント
         startBtn.onclick = async () => {
+            log("録音ボタンが押されました");
             try {
-                // マイク使用許可を取得
+                log("マイク権限をリクエスト中...");
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                log("マイク許可されました");
+
                 document.getElementById('silent-audio').play();
                 
                 isFirstTime = true;
@@ -104,26 +121,29 @@
                 startSegment(stream);
 
                 timer = setInterval(() => {
-                    if (rec && rec.state === "recording") rec.stop();
+                    if (rec && rec.state === "recording") {
+                        log("10分経過、自動区切り実行");
+                        rec.stop();
+                    }
                 }, 600000); 
 
                 startBtn.disabled = true;
                 stopBtn.disabled = false;
-                status.innerHTML = "録音中...（10分ごとに自動保存・Worker処理中）";
+                status.innerHTML = "録音中...";
             } catch (err) {
-                status.innerText = "エラー: " + err;
-                console.error("録音開始エラー:", err);
+                log("開始エラー: " + err.name + ": " + err.message);
             }
         };
 
         stopBtn.onclick = () => {
+            log("停止ボタンが押されました");
             isFinalAction = true;
             clearInterval(timer);
             if (rec && rec.state !== "inactive") {
                 rec.stop();
                 rec.stream.getTracks().forEach(track => track.stop());
             }
-            status.innerHTML = "最終データを送信中...<br>AIが議事録を作成しています。";
+            status.innerHTML = "最終データを送信中...";
             stopBtn.disabled = true;
         };
     </script>
