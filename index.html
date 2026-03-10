@@ -28,6 +28,7 @@
         
         let rec, timer, audioCtx;
         let isFirstTime = true;
+        let isFinal = false; // ★この一行を追加してください！
         let isFinalAction = false;
         const worker = new Worker('worker.js');
         
