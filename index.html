@@ -93,9 +93,14 @@
             rec.start();
         };
 
-        startBtn.onclick = async () => {
+            startBtn.onclick = async () => {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                // ★ ここで一度だけ作成し、再利用する（もし未作成なら作る）
+                if (!audioCtx) {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
                 document.getElementById('silent-audio').play();
                 
                 isFirstTime = true;
