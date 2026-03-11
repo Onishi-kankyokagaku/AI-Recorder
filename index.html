@@ -86,7 +86,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.0.9</span>
+        <span id="version-tag">Ver. 1.1.0</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -202,7 +202,7 @@
 
             timer = setInterval(() => {
                 if (rec && rec.state === "recording") rec.stop();
-            }, 60000); // 1分ごとに区切る設定 
+            }, 600000); // 10分ごとに区切る設定 
 
             startBtn.disabled = true;
             stopBtn.disabled = false;
