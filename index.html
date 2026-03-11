@@ -86,7 +86,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.0.7</span>
+        <span id="version-tag">Ver. 1.0.8</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -125,19 +125,30 @@
         // 1. Worker初期化
         worker = new Worker('worker.js');
 
-        worker.onmessage = (e) => {
+    worker.onmessage = (e) => {
             const data = e.data;
             if (data.status === 'success') {
-                // --- [Step 1 変更] 起動時のSS確保に成功した場合 ---
                 if (data.type === 'init') {
                     currentSsId = data.result.ssId;
+                    currentSsUrl = data.result.url; // URLを保存しておく
                     startBtn.disabled = false;
-                    status.innerHTML = "準備完了（SS確保済み）";
-                    if (data.result.url) {
-                        status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
-                    }
+                    status.innerHTML = "準備完了"; // ここではリンクを出さない
                     return;
                 }
+
+                // --- [変更点] type: "final" の成功を受け取った時だけリンクを出す ---
+                if (data.type === 'final') {
+                    status.innerHTML = `<h3>✨ 議事録が完成しました</h3>`;
+                    status.innerHTML += `<a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>`;
+                    log("全工程が完了しました。");
+                } else {
+                    log(`No.${data.index} 転記完了`);
+                }
+
+            } else {
+                log(`エラー: ${data.error}`);
+            }
+        };
 
                 log(`GAS成功: ${data.type} (No.${data.index})`);
             } else {
