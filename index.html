@@ -98,61 +98,72 @@
         <source src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=" type="audio/wav">
     </audio>
 
-    <script>
-        // --- 1. 設定・宣言エリア ---
+<script>
         const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
         
         let currentSsId = null; 
         let rec = null, timer = null, audioCtx = null;
-        let isFirstTime = true, isFinalAction = false;
+        let isFinalAction = false;
         let worker = null;
+        
+        // --- [Step 1 追加] 連番管理用の変数 ---
+        let sendCount = 0; 
 
         const status = document.getElementById('status');
         const startBtn = document.getElementById('start');
         const stopBtn = document.getElementById('stop');
+
+        // 初期状態では開始ボタンを無効化しておく
+        startBtn.disabled = true;
+        status.innerHTML = "システム初期化中（スプレッドシート作成中）...";
 
         function log(msg) {
             console.log(msg);
             status.innerHTML += `<br><span style="color:blue;font-size:0.8rem;">[Log] ${msg}</span>`;
         }
 
-        // --- 2. Worker初期化 ---
-        try {
-            worker = new Worker('worker.js');
-            log("Worker準備完了");
-        } catch(e) {
-            log("Workerエラー: " + e.message);
-        }
+        // 1. Worker初期化
+        worker = new Worker('worker.js');
 
         worker.onmessage = (e) => {
             const data = e.data;
             if (data.status === 'success') {
-                log(`GAS成功: ${data.type} / ${data.result.message}`);
-                if (data.result.ssId) currentSsId = data.result.ssId;
-                
-                if (data.result.url && (data.type === 'start' || data.type === 'final')) {
-                    if (!document.querySelector('.ss-link')) {
+                // --- [Step 1 変更] 起動時のSS確保に成功した場合 ---
+                if (data.type === 'init') {
+                    currentSsId = data.result.ssId;
+                    startBtn.disabled = false;
+                    status.innerHTML = "準備完了（SS確保済み）";
+                    if (data.result.url) {
                         status.innerHTML += `<br><a href="${data.result.url}" target="_blank" class="ss-link">スプレッドシートを開く ↗</a>`;
                     }
+                    return;
                 }
-                if (data.type === 'final') {
-                    status.innerHTML = "<strong>議事録の作成が完了しました。</strong>";
-                    currentSsId = null; 
-                }
+
+                log(`GAS成功: ${data.type} (No.${data.index})`);
             } else {
-                log(`エラー [${data.type}]: ${data.error}`);
+                log(`エラー: ${data.error}`);
             }
         };
 
-        // --- 3. 録音コアロジック ---
+        // --- [Step 1 起動時処理] ページを開いた瞬間にGASへIDを要求 ---
+        window.onload = () => {
+            log("SS発行リクエスト送信...");
+            worker.postMessage({
+                type: 'init',
+                gasUrl: GAS_URL
+            });
+        };
+
         const startSegment = async (stream) => {
             let chunks = [];
             rec = new MediaRecorder(stream);
             rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
             
             rec.onstop = async () => {
-                let sendType = isFinalAction ? "final" : (isFirstTime ? "start" : "memo");
-                log(`送信判定: ${sendType}`);
+                // --- [Step 1 変更] 送信ごとにインデックスを付与 ---
+                sendCount++; 
+                let currentIndex = sendCount; 
+                let sendType = isFinalAction ? "final" : "memo"; 
 
                 if (chunks.length === 0) return;
                 const blob = new Blob(chunks, { type: 'audio/webm' });
@@ -160,33 +171,27 @@
                 
                 if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
-                    log(`${sendType} 送信中...`);
+                    log(`No.${currentIndex} 送信開始...`);
                     const floatArray = buffer.getChannelData(0);
                     worker.postMessage({
                         floatArray: floatArray,
                         sampleRate: buffer.sampleRate,
                         type: sendType,
+                        index: currentIndex, // 連番を送信
                         gasUrl: GAS_URL,
                         ssId: currentSsId
                     }, [floatArray.buffer]);
                     
-                    isFirstTime = false;
                     if (!isFinalAction) startSegment(stream);
                 });
             };
             rec.start();
         };
 
-        // --- 4. 操作イベント ---
         startBtn.onclick = async () => {
-            log("● 録音開始リクエスト");
             try {
-                isFirstTime = true;
                 isFinalAction = false;
-                
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                log("マイク許可OK");
-
                 document.getElementById('silent-audio').play();
                 startSegment(stream);
 
@@ -203,7 +208,6 @@
         };
 
         stopBtn.onclick = () => {
-            log("■ 停止・解析リクエスト");
             isFinalAction = true;
             clearInterval(timer);
             if (rec && rec.state !== "inactive") {
