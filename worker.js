@@ -1,7 +1,8 @@
 importScripts('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.all.min.js');
 
 self.onmessage = async (e) => {
-    const { type, gasUrl, ssId, index } = e.data;
+    // ★ 修正ポイント1: logRow を受け取り項目に追加
+    const { type, gasUrl, ssId, index, logRow } = e.data;
 
     // --- [Step 1: SS発行（初期化）] ---
     if (type === 'init') {
@@ -26,7 +27,7 @@ self.onmessage = async (e) => {
         return;
     }
 
-    // 録音データを変換する関数の呼び出し
+    // 録音データを変換
     const wavBuffer = encodeWAV(floatArray, sampleRate);
     const base64Audio = arrayBufferToBase64(wavBuffer);
 
@@ -37,6 +38,7 @@ self.onmessage = async (e) => {
                 type: type,
                 index: index,
                 ssId: ssId,
+                logRow: logRow, // ★ 修正ポイント2: GASへ送るデータに logRow を追加
                 audio: base64Audio
             })
         });
@@ -52,7 +54,7 @@ self.onmessage = async (e) => {
     }
 };
 
-// --- 以下、音声変換に必要な関数（ここが重要です！） ---
+// --- 以下、音声変換に必要な関数（変更なし） ---
 
 function encodeWAV(samples, sampleRate) {
     const buffer = new ArrayBuffer(44 + samples.length * 2);
