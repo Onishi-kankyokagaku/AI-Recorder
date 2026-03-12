@@ -86,7 +86,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.1</span>
+        <span id="version-tag">Ver. 1.1.2</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -102,7 +102,8 @@
     const GAS_URL = "https://script.google.com/macros/s/AKfycbwnThA6GO1XmW9ub9GnIYKNZGl23tPAqheTpRo5MGAtrw3iJpSwv_GKRmQqJmZML65m/exec";
     
     let currentSsId = null; 
-    let currentSsUrl = null; // SSのURL保存用
+    let currentSsUrl = null; 
+    let currentLogRow = null; // ★追加：管理ログの行番号保持用
     let rec = null, timer = null, audioCtx = null;
     let isFinalAction = false;
     let worker = null;
@@ -120,24 +121,21 @@
         status.innerHTML += `<br><span style="color:blue;font-size:0.8rem;">[Log] ${msg}</span>`;
     }
 
-    // 1. Worker初期化
     worker = new Worker('worker.js');
 
-    // --- ここで返信を一括管理します ---
     worker.onmessage = (e) => {
         const data = e.data;
         if (data.status === 'success') {
-            // 初期化成功時
             if (data.type === 'init') {
                 currentSsId = data.result.ssId;
                 currentSsUrl = data.result.url; 
+                currentLogRow = data.result.logRow; // ★重要：GASから受け取ったログ行番号を保存
                 startBtn.disabled = false;
                 status.innerHTML = "準備完了";
                 log("スプレッドシートを確保しました");
                 return;
             }
 
-            // FINAL（終了）処理成功時：ここでリンクを出す
             if (data.type === 'final') {
                 status.innerHTML = `<h3>✨ 議事録が完成しました</h3>`;
                 status.innerHTML += `<a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>`;
@@ -150,7 +148,6 @@
         }
     };
 
-    // --- 起動時処理 ---
     window.onload = () => {
         log("SS発行リクエスト送信...");
         worker.postMessage({
@@ -183,7 +180,8 @@
                     type: sendType,
                     index: currentIndex,
                     gasUrl: GAS_URL,
-                    ssId: currentSsId
+                    ssId: currentSsId,
+                    logRow: currentLogRow // ★重要：保存していた行番号をGASに送り返す
                 }, [floatArray.buffer]);
                 
                 if (!isFinalAction) startSegment(stream);
@@ -195,14 +193,14 @@
     startBtn.onclick = async () => {
         try {
             isFinalAction = false;
-            sendCount = 0; // カウントをリセット
+            sendCount = 0; 
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             document.getElementById('silent-audio').play();
             startSegment(stream);
 
             timer = setInterval(() => {
                 if (rec && rec.state === "recording") rec.stop();
-            }, 300000); // 5分ごとに区切る設定 
+            }, 300000); 
 
             startBtn.disabled = true;
             stopBtn.disabled = false;
