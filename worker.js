@@ -19,6 +19,23 @@ self.onmessage = async (e) => {
         return; 
     }
 
+    // ★ ここを追加：録音開始ボタンが押された時の通知処理
+    if (type === 'recording') {
+        try {
+            fetch(gasUrl, {
+                method: 'POST',
+                body: JSON.stringify({ 
+                    type: 'recording', 
+                    logRow: logRow 
+                })
+            });
+            // 成功を待たずに return してOK（通知するだけでよいため）
+        } catch (error) {
+            console.error("Recording status update error:", error);
+        }
+        return; // 音声データがないのでここで処理を終了させる
+    }
+    
     // --- [通常録音の送信] ---
     const { floatArray, sampleRate } = e.data;
     
