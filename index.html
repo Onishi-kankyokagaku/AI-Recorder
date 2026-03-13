@@ -191,8 +191,15 @@
     };
 
     startBtn.onclick = async () => {
-      // ★ここを追加：GASのステータス更新を呼び出す（非同期でOK）
-      google.script.run.updateStatusToRecording();
+        // ★ ここを修正：Workerに「録音開始」を通知させる
+        if (currentLogRow) {
+            worker.postMessage({
+                type: 'recording',
+                gasUrl: GAS_URL,
+                logRow: currentLogRow
+            });
+        }
+
         try {
             isFinalAction = false;
             sendCount = 0; 
