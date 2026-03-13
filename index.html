@@ -209,7 +209,7 @@
 
             timer = setInterval(() => {
                 if (rec && rec.state === "recording") rec.stop();
-            }, 300000); 
+            }, 15000); //300000
 
             startBtn.disabled = true;
             stopBtn.disabled = false;
