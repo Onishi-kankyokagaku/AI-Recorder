@@ -191,6 +191,8 @@
     };
 
     startBtn.onclick = async () => {
+      // ★ここを追加：GASのステータス更新を呼び出す（非同期でOK）
+      google.script.run.updateStatusToRecording();
         try {
             isFinalAction = false;
             sendCount = 0; 
