@@ -6,17 +6,45 @@
     <title>AI議事録レコーダー</title>
 <style>
 
-    /* 録音中のボタン色（元の緑色のまま） */
+    /* 録音中のボタン：深みのある光と鼓動 */
     .recording-active {
-        background: #4CAF50 !important; /* 元の緑色を指定 */
-        animation: pulse-green 1.5s infinite; /* アニメーション名を変更 */
+        background: linear-gradient(135.2deg, #4CAF50 1.2%, #81C784 98.8%) !important;
+        position: relative;
+        border: none;
+        outline: none;
+        /* 2種類の影を重ねてネオン感を出す */
+        box-shadow: 0 0 15px rgba(76, 175, 80, 0.6), 0 0 30px rgba(76, 175, 80, 0.4);
+        animation: living-pulse 2.5s infinite ease-in-out;
+    }
+
+    /* 鼓動するように広がる波紋 */
+    @keyframes living-pulse {
+        0% {
+            transform: scale(1);
+            filter: brightness(1);
+            box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7);
+        }
+        40% {
+            transform: scale(1.03); /* ぐっと前に出る感じ */
+            filter: brightness(1.2); /* 少し明るく */
+            box-shadow: 0 0 0 25px rgba(76, 175, 80, 0); /* 大きく広がる波紋 */
+        }
+        100% {
+            transform: scale(1);
+            filter: brightness(1);
+            box-shadow: 0 0 0 0 rgba(76, 175, 80, 0);
+        }
     }
     
-    /* 緑色でポワンと光るアニメーション */
-    @keyframes pulse-green {
-        0% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7); }  /* 緑色の影 (rgbaで指定) */
-        70% { box-shadow: 0 0 0 15px rgba(76, 175, 80, 0); } /* 15pxまで広がる */
-        100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }  /* 消える */
+    /* ついでに停止ボタンも録音中は「停止待ち」らしく少し光らせるとカッコいいです */
+    #stop:not(:disabled) {
+        animation: stop-alert 2s infinite;
+    }
+    
+    @keyframes stop-alert {
+        0% { opacity: 1; }
+        50% { opacity: 0.8; }
+        100% { opacity: 1; }
     }
     
     body { 
