@@ -5,7 +5,21 @@
     <meta charset="UTF-8">
     <title>AI議事録レコーダー</title>
 <style>
-        body { 
+
+     /* 録音中のボタン色（鮮やかな赤やオレンジなど） */
+    .recording-active {
+        background: #ff5722 !important; /* 強制的に色を上書き */
+        animation: pulse 1.5s infinite;
+    }
+    
+    /* 録音中にポワンと光るアニメーション */
+    @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(255, 87, 34, 0.7); }
+        70% { box-shadow: 0 0 0 15px rgba(255, 87, 34, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(255, 87, 34, 0); }
+    }   
+    
+    body { 
             font-family: sans-serif; 
             text-align: center; 
             padding: 40px 15px; 
@@ -193,16 +207,19 @@
         rec.start();
     };
 
-    startBtn.onclick = async () => {
-        // ★ ここを修正：Workerに「録音開始」を通知させる
-        if (currentLogRow) {
-            worker.postMessage({
-                type: 'recording',
-                gasUrl: GAS_URL,
-                logRow: currentLogRow
-            });
-        }
+startBtn.onclick = async () => {
+    // クラスを追加して色を変える
+    startBtn.classList.add('recording-active');
+    startBtn.innerText = "● 録音中..."; // テキストも変えると親切です
 
+    // (既存のWorker通知処理などはそのまま)
+    if (currentLogRow) {
+        worker.postMessage({
+            type: 'recording',
+            gasUrl: GAS_URL,
+            logRow: currentLogRow
+        });
+    }
         try {
             isFinalAction = false;
             sendCount = 0; 
@@ -224,6 +241,11 @@
 
     stopBtn.onclick = () => {
         isFinalAction = true;
+        
+        // 録音中クラスを外して、テキストを元に戻す
+        startBtn.classList.remove('recording-active');
+        startBtn.innerText = "● 録音開始";
+        
         clearInterval(timer);
         if (rec && rec.state !== "inactive") {
             rec.stop();
