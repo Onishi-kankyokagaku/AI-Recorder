@@ -128,7 +128,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.6</span>
+        <span id="version-tag">Ver. 1.1.7</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -150,20 +150,27 @@
     let isFinalAction = false;
     let worker = null;
     let sendCount = 0; 
-    let wakeLock = null; // ★追加：画面スリープ防止用
+    let wakeLock = null;
 
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
     const stopBtn = document.getElementById('stop');
 
-    // ★追加：画面スリープ防止（Wake Lock）のリクエスト関数
+    // --- ① 初期状態の設定 ---
+    startBtn.disabled = true; // SSができるまで押せないようにする
+    status.innerHTML = "システム初期化中（スプレッドシート作成中）...";
+
+    function log(msg) {
+        console.log(msg);
+        status.innerHTML += `<br><span style="color:blue;font-size:0.8rem;">[Log] ${msg}</span>`;
+    }
+
+    // --- ② Wake Lock 関数 ---
     const requestWakeLock = async () => {
         try {
             if ('wakeLock' in navigator) {
                 wakeLock = await navigator.wakeLock.request('screen');
                 log("画面スリープ防止：有効");
-                
-                // もし何らかの理由でロックが外れたら再取得する設定
                 wakeLock.addEventListener('release', () => {
                     log("画面スリープ防止：解除されました");
                 });
@@ -173,9 +180,7 @@
         }
     };
 
-    // (中略：worker.onmessage や window.onload などの既存コードはそのまま)
-    // --- ここに既存の worker.onmessage ～ startSegment を配置 ---
-
+    // --- ③ Workerの設定と初期化リクエスト ---
     worker = new Worker('worker.js');
 
     worker.onmessage = (e) => {
@@ -185,18 +190,15 @@
                 currentSsId = data.result.ssId;
                 currentSsUrl = data.result.url; 
                 currentLogRow = data.result.logRow;
-                startBtn.disabled = false;
+                startBtn.disabled = false; // ここで初めてボタンを有効化！
                 status.innerHTML = "準備完了";
                 log("スプレッドシートを確保しました");
                 return;
             }
-
             if (data.type === 'final') {
                 status.innerHTML = `<h3>✨ 議事録が完成しました</h3>`;
                 status.innerHTML += `<a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>`;
-                status.innerHTML += `<p style="margin-top: 15px; font-size: 0.9rem; color: #666;">
-                    ※議事録上部にあるボタンをクリックするとエクセル形式でダウンロードできます。
-                </p>`;                
+                status.innerHTML += `<p style="margin-top: 15px; font-size: 0.9rem; color: #666;">※議事録上部のボタンからダウンロード可能です。</p>`;                
                 log("全工程が完了しました。");
             } else {
                 log(`No.${data.index} 転記完了`);
@@ -206,6 +208,7 @@
         }
     };
 
+    // ページ読み込み時にSS作成を依頼
     window.onload = () => {
         log("SS発行リクエスト送信...");
         worker.postMessage({
@@ -214,6 +217,7 @@
         });
     };
 
+    // --- ④ 録音処理メイン ---
     const startSegment = async (stream) => {
         let chunks = [];
         rec = new MediaRecorder(stream);
@@ -251,16 +255,10 @@
     startBtn.onclick = async () => {
         startBtn.classList.add('recording-active');
         startBtn.innerText = "● 録音中..."; 
-
-        // ★追加：録音開始時に画面スリープを防止
         await requestWakeLock();
 
         if (currentLogRow) {
-            worker.postMessage({
-                type: 'recording',
-                gasUrl: GAS_URL,
-                logRow: currentLogRow
-            });
+            worker.postMessage({ type: 'recording', gasUrl: GAS_URL, logRow: currentLogRow });
         }
         try {
             isFinalAction = false;
@@ -283,28 +281,21 @@
 
     stopBtn.onclick = async () => {
         isFinalAction = true;
-        
-        // ★追加：録音終了時に画面スリープ防止を解除
         if (wakeLock !== null) {
-            wakeLock.release().then(() => {
-                wakeLock = null;
-                log("画面スリープ防止：解除完了");
-            });
+            await wakeLock.release();
+            wakeLock = null;
         }
-
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音開始";
-        
         clearInterval(timer);
         if (rec && rec.state !== "inactive") {
             rec.stop();
             rec.stream.getTracks().forEach(track => track.stop());
         }
-        status.innerHTML = "最終データを解析中...<br>（議事録作成まで3分ほどかかる場合があります）";
+        status.innerHTML = "最終データを解析中...";
         stopBtn.disabled = true;
     };
 
-    // ★追加：もし途中で画面を手動で消して、再度開いたときにロックをかけ直す処理
     document.addEventListener('visibilitychange', async () => {
         if (wakeLock !== null && document.visibilityState === 'visible') {
             await requestWakeLock();
