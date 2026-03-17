@@ -128,7 +128,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.5</span>
+        <span id="version-tag">Ver. 1.1.6</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -145,23 +145,36 @@
     
     let currentSsId = null; 
     let currentSsUrl = null; 
-    let currentLogRow = null; // ★追加：管理ログの行番号保持用
+    let currentLogRow = null; 
     let rec = null, timer = null, audioCtx = null;
     let isFinalAction = false;
     let worker = null;
     let sendCount = 0; 
+    let wakeLock = null; // ★追加：画面スリープ防止用
 
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
     const stopBtn = document.getElementById('stop');
 
-    startBtn.disabled = true;
-    status.innerHTML = "システム初期化中（スプレッドシート作成中）...";
+    // ★追加：画面スリープ防止（Wake Lock）のリクエスト関数
+    const requestWakeLock = async () => {
+        try {
+            if ('wakeLock' in navigator) {
+                wakeLock = await navigator.wakeLock.request('screen');
+                log("画面スリープ防止：有効");
+                
+                // もし何らかの理由でロックが外れたら再取得する設定
+                wakeLock.addEventListener('release', () => {
+                    log("画面スリープ防止：解除されました");
+                });
+            }
+        } catch (err) {
+            log(`WakeLockエラー: ${err.name}, ${err.message}`);
+        }
+    };
 
-    function log(msg) {
-        console.log(msg);
-        status.innerHTML += `<br><span style="color:blue;font-size:0.8rem;">[Log] ${msg}</span>`;
-    }
+    // (中略：worker.onmessage や window.onload などの既存コードはそのまま)
+    // --- ここに既存の worker.onmessage ～ startSegment を配置 ---
 
     worker = new Worker('worker.js');
 
@@ -171,7 +184,7 @@
             if (data.type === 'init') {
                 currentSsId = data.result.ssId;
                 currentSsUrl = data.result.url; 
-                currentLogRow = data.result.logRow; // ★重要：GASから受け取ったログ行番号を保存
+                currentLogRow = data.result.logRow;
                 startBtn.disabled = false;
                 status.innerHTML = "準備完了";
                 log("スプレッドシートを確保しました");
@@ -226,7 +239,7 @@
                     index: currentIndex,
                     gasUrl: GAS_URL,
                     ssId: currentSsId,
-                    logRow: currentLogRow // ★重要：保存していた行番号をGASに送り返す
+                    logRow: currentLogRow
                 }, [floatArray.buffer]);
                 
                 if (!isFinalAction) startSegment(stream);
@@ -235,19 +248,20 @@
         rec.start();
     };
 
-startBtn.onclick = async () => {
-    // クラスを追加して色を変える
-    startBtn.classList.add('recording-active');
-    startBtn.innerText = "● 録音中..."; // テキストも変えると親切です
+    startBtn.onclick = async () => {
+        startBtn.classList.add('recording-active');
+        startBtn.innerText = "● 録音中..."; 
 
-    // (既存のWorker通知処理などはそのまま)
-    if (currentLogRow) {
-        worker.postMessage({
-            type: 'recording',
-            gasUrl: GAS_URL,
-            logRow: currentLogRow
-        });
-    }
+        // ★追加：録音開始時に画面スリープを防止
+        await requestWakeLock();
+
+        if (currentLogRow) {
+            worker.postMessage({
+                type: 'recording',
+                gasUrl: GAS_URL,
+                logRow: currentLogRow
+            });
+        }
         try {
             isFinalAction = false;
             sendCount = 0; 
@@ -257,7 +271,7 @@ startBtn.onclick = async () => {
 
             timer = setInterval(() => {
                 if (rec && rec.state === "recording") rec.stop();
-            }, 300000); //300000（※5分区切りにする）
+            }, 300000); 
 
             startBtn.disabled = true;
             stopBtn.disabled = false;
@@ -267,10 +281,17 @@ startBtn.onclick = async () => {
         }
     };
 
-    stopBtn.onclick = () => {
+    stopBtn.onclick = async () => {
         isFinalAction = true;
         
-        // 録音中クラスを外して、テキストを元に戻す
+        // ★追加：録音終了時に画面スリープ防止を解除
+        if (wakeLock !== null) {
+            wakeLock.release().then(() => {
+                wakeLock = null;
+                log("画面スリープ防止：解除完了");
+            });
+        }
+
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音開始";
         
@@ -282,6 +303,13 @@ startBtn.onclick = async () => {
         status.innerHTML = "最終データを解析中...<br>（議事録作成まで3分ほどかかる場合があります）";
         stopBtn.disabled = true;
     };
+
+    // ★追加：もし途中で画面を手動で消して、再度開いたときにロックをかけ直す処理
+    document.addEventListener('visibilitychange', async () => {
+        if (wakeLock !== null && document.visibilityState === 'visible') {
+            await requestWakeLock();
+        }
+    });
 </script>
 </body>
 </html>
