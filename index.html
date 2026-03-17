@@ -128,7 +128,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.7</span>
+        <span id="version-tag">Ver. 1.1.6</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -155,9 +155,10 @@
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
     const stopBtn = document.getElementById('stop');
+    const silentAudio = document.getElementById('silent-audio'); // 要素を取得
 
     // --- ① 初期状態の設定 ---
-    startBtn.disabled = true; // SSができるまで押せないようにする
+    startBtn.disabled = true;
     status.innerHTML = "システム初期化中（スプレッドシート作成中）...";
 
     function log(msg) {
@@ -190,7 +191,7 @@
                 currentSsId = data.result.ssId;
                 currentSsUrl = data.result.url; 
                 currentLogRow = data.result.logRow;
-                startBtn.disabled = false; // ここで初めてボタンを有効化！
+                startBtn.disabled = false;
                 status.innerHTML = "準備完了";
                 log("スプレッドシートを確保しました");
                 return;
@@ -200,6 +201,8 @@
                 status.innerHTML += `<a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>`;
                 status.innerHTML += `<p style="margin-top: 15px; font-size: 0.9rem; color: #666;">※議事録上部のボタンからダウンロード可能です。</p>`;                
                 log("全工程が完了しました。");
+                // 完了後は離脱警告を解除
+                window.onbeforeunload = null;
             } else {
                 log(`No.${data.index} 転記完了`);
             }
@@ -208,13 +211,9 @@
         }
     };
 
-    // ページ読み込み時にSS作成を依頼
     window.onload = () => {
         log("SS発行リクエスト送信...");
-        worker.postMessage({
-            type: 'init',
-            gasUrl: GAS_URL
-        });
+        worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
     // --- ④ 録音処理メイン ---
@@ -257,6 +256,12 @@
         startBtn.innerText = "● 録音中..."; 
         await requestWakeLock();
 
+        // 録音中の離脱警告をセット
+        window.onbeforeunload = (e) => {
+            e.preventDefault();
+            return "録音中にページを離れるとデータが失われます。";
+        };
+
         if (currentLogRow) {
             worker.postMessage({ type: 'recording', gasUrl: GAS_URL, logRow: currentLogRow });
         }
@@ -264,7 +269,10 @@
             isFinalAction = false;
             sendCount = 0; 
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            document.getElementById('silent-audio').play();
+            
+            // ★無音再生スタート
+            silentAudio.play();
+            
             startSegment(stream);
 
             timer = setInterval(() => {
@@ -281,10 +289,16 @@
 
     stopBtn.onclick = async () => {
         isFinalAction = true;
+
+        // ★追加：無音再生を停止してリセット
+        silentAudio.pause();
+        silentAudio.currentTime = 0;
+
         if (wakeLock !== null) {
             await wakeLock.release();
             wakeLock = null;
         }
+
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音開始";
         clearInterval(timer);
