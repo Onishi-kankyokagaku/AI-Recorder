@@ -201,6 +201,14 @@
                 status.innerHTML += `<a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>`;
                 status.innerHTML += `<p style="margin-top: 15px; font-size: 0.9rem; color: #666;">※議事録上部のボタンからダウンロード可能です。</p>`;                
                 log("全工程が完了しました。");
+
+                // --- ★追加：ここで初めて全部解除！ ---
+                silentAudio.pause();
+                silentAudio.currentTime = 0;
+                if (wakeLock !== null) {
+                    wakeLock.release().then(() => { wakeLock = null; });
+                }                
+                
                 // 完了後は離脱警告を解除
                 window.onbeforeunload = null;
             } else {
@@ -289,15 +297,6 @@
 
     stopBtn.onclick = async () => {
         isFinalAction = true;
-
-        // ★追加：無音再生を停止してリセット
-        silentAudio.pause();
-        silentAudio.currentTime = 0;
-
-        if (wakeLock !== null) {
-            await wakeLock.release();
-            wakeLock = null;
-        }
 
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音開始";
