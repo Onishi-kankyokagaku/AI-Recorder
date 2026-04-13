@@ -1,8 +1,38 @@
 importScripts('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.all.min.js');
 
 self.onmessage = async (e) => {
-    // ★ 修正ポイント1: logRow を受け取り項目に追加
     const { type, gasUrl, ssId, index, logRow } = e.data;
+
+    // --- [新規：ステータス確認] ---
+    if (type === 'check_status') {
+        try {
+            const response = await fetch(gasUrl, {
+                method: 'POST',
+                body: JSON.stringify({ type: 'check_status', logRow: logRow })
+            });
+            const result = await response.json();
+            self.postMessage({ status: 'success', type: 'check_status', result: result });
+        } catch (error) {
+            self.postMessage({ status: 'error', type: 'check_status', error: error.message });
+        }
+        return;
+    }
+
+    // --- [新規：議事録作成の最終実行指示] ---
+    // final送信後にこれを送ることで、GAS側でじっくり要約処理を走らせます
+    if (type === 'finalize_request') {
+        try {
+            fetch(gasUrl, {
+                method: 'POST',
+                body: JSON.stringify({ type: 'execute_finalize', ssId: ssId, logRow: logRow })
+            });
+            // 要約はタイムアウトする可能性が高いので、レスポンスを待たずに成功を返す
+            self.postMessage({ status: 'success', type: 'finalize_request' });
+        } catch (error) {
+            console.error("Finalize request error:", error);
+        }
+        return;
+    }
 
     // --- [Step 1: SS発行（初期化）] ---
     if (type === 'init') {
@@ -19,32 +49,26 @@ self.onmessage = async (e) => {
         return; 
     }
 
-    // ★ ここを追加：録音開始ボタンが押された時の通知処理
+    // --- [録音開始時の通知処理] ---
     if (type === 'recording') {
         try {
             fetch(gasUrl, {
                 method: 'POST',
-                body: JSON.stringify({ 
-                    type: 'recording', 
-                    logRow: logRow 
-                })
+                body: JSON.stringify({ type: 'recording', logRow: logRow })
             });
-            // 成功を待たずに return してOK（通知するだけでよいため）
         } catch (error) {
             console.error("Recording status update error:", error);
         }
-        return; // 音声データがないのでここで処理を終了させる
+        return;
     }
     
-    // --- [通常録音の送信] ---
+    // --- [通常録音の送信（memo / final）] ---
     const { floatArray, sampleRate } = e.data;
-    
     if (!floatArray) {
         self.postMessage({ status: 'error', type: type, error: "音声データが空です" });
         return;
     }
 
-    // 録音データを変換
     const wavBuffer = encodeWAV(floatArray, sampleRate);
     const base64Audio = arrayBufferToBase64(wavBuffer);
 
@@ -55,11 +79,13 @@ self.onmessage = async (e) => {
                 type: type,
                 index: index,
                 ssId: ssId,
-                logRow: logRow, // ★ 修正ポイント2: GASへ送るデータに logRow を追加
+                logRow: logRow,
                 audio: base64Audio
             })
         });
         const result = await response.json();
+        
+        // type が final の場合、このレスポンスが返った直後にメイン側から finalize_request を送る流れになります
         self.postMessage({ 
             status: 'success', 
             type: type, 
@@ -71,7 +97,6 @@ self.onmessage = async (e) => {
     }
 };
 
-// --- 以下、音声変換に必要な関数（変更なし） ---
 
 function encodeWAV(samples, sampleRate) {
     const buffer = new ArrayBuffer(44 + samples.length * 2);
