@@ -24,7 +24,7 @@ self.onmessage = async (e) => {
         try {
             fetch(gasUrl, {
                 method: 'POST',
-                body: JSON.stringify({ type: 'execute_finalize', ssId: ssId, logRow: logRow })
+                body: JSON.stringify({ type: 'execute_finalize', ssId: ssId, logRow: logRow, index: index })
             });
             // 要約はタイムアウトする可能性が高いので、レスポンスを待たずに成功を返す
             self.postMessage({ status: 'success', type: 'finalize_request' });
