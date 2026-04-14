@@ -1,7 +1,16 @@
 importScripts('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.all.min.js');
 
+// ★【重要】最後に届いたindex（セグメント番号）をWorker内で保持します
+let lastIndex = 0;
+
 self.onmessage = async (e) => {
+    // e.data から変数を取り出す
     const { type, gasUrl, ssId, index, logRow } = e.data;
+
+    // ★indexが届いていれば常に更新（1, 2, 3...と増えていくのを記憶する）
+    if (index !== undefined && index !== null) {
+        lastIndex = index;
+    }
 
     // --- [新規：ステータス確認] ---
     if (type === 'check_status') {
@@ -19,14 +28,18 @@ self.onmessage = async (e) => {
     }
 
     // --- [新規：議事録作成の最終実行指示] ---
-    // final送信後にこれを送ることで、GAS側でじっくり要約処理を走らせます
     if (type === 'finalize_request') {
         try {
+            // ★ポイント：ここでの body.index には、Workerが記憶している lastIndex を入れます
             fetch(gasUrl, {
                 method: 'POST',
-                body: JSON.stringify({ type: 'execute_finalize', ssId: ssId, logRow: logRow, index: index })
+                body: JSON.stringify({ 
+                    type: 'execute_finalize', 
+                    ssId: ssId, 
+                    logRow: logRow, 
+                    index: lastIndex 
+                })
             });
-            // 要約はタイムアウトする可能性が高いので、レスポンスを待たずに成功を返す
             self.postMessage({ status: 'success', type: 'finalize_request' });
         } catch (error) {
             console.error("Finalize request error:", error);
@@ -85,7 +98,6 @@ self.onmessage = async (e) => {
         });
         const result = await response.json();
         
-        // type が final の場合、このレスポンスが返った直後にメイン側から finalize_request を送る流れになります
         self.postMessage({ 
             status: 'success', 
             type: type, 
