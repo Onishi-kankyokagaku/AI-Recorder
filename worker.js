@@ -19,7 +19,7 @@ self.onmessage = async (e) => {
         return; 
     }
 
-    // ★ ここを追加：録音開始ボタンが押された時の通知処理
+    // ★ 録音開始ボタンが押された時の通知処理
     if (type === 'recording') {
         try {
             fetch(gasUrl, {
@@ -29,11 +29,10 @@ self.onmessage = async (e) => {
                     logRow: logRow 
                 })
             });
-            // 成功を待たずに return してOK（通知するだけでよいため）
         } catch (error) {
             console.error("Recording status update error:", error);
         }
-        return; // 音声データがないのでここで処理を終了させる
+        return; 
     }
     
     // --- [通常録音の送信] ---
@@ -44,70 +43,74 @@ self.onmessage = async (e) => {
         return;
     }
 
-    // 録音データを変換
-    const wavBuffer = encodeWAV(floatArray, sampleRate);
-    const base64Audio = arrayBufferToBase64(wavBuffer);
+    // ★ 修正ポイント：WAVではなく、本物のMP3に変換を実行
+    const mp3Blob = encodeMP3(floatArray, sampleRate);
+    
+    // BlobをBase64に変換して送信
+    const reader = new FileReader();
+    reader.readAsDataURL(mp3Blob);
+    reader.onloadend = async () => {
+        const base64Audio = reader.result.split(',')[1];
 
-    try {
-        const response = await fetch(gasUrl, {
-            method: 'POST',
-            body: JSON.stringify({
-                type: type,
+        try {
+            const response = await fetch(gasUrl, {
+                method: 'POST',
+                body: JSON.stringify({
+                    type: type,
+                    index: index,
+                    ssId: ssId,
+                    logRow: logRow,
+                    audio: base64Audio
+                })
+            });
+            const result = await response.json();
+            self.postMessage({ 
+                status: 'success', 
+                type: type, 
                 index: index,
-                ssId: ssId,
-                logRow: logRow, // ★ 修正ポイント2: GASへ送るデータに logRow を追加
-                audio: base64Audio
-            })
-        });
-        const result = await response.json();
-        self.postMessage({ 
-            status: 'success', 
-            type: type, 
-            index: index,
-            result: result 
-        });
-    } catch (error) {
-        self.postMessage({ status: 'error', type: type, error: error.message });
-    }
-};
-
-// --- 以下、音声変換に必要な関数（変更なし） ---
-
-function encodeWAV(samples, sampleRate) {
-    const buffer = new ArrayBuffer(44 + samples.length * 2);
-    const view = new DataView(buffer);
-    const writeString = (offset, string) => {
-        for (let i = 0; i < string.length; i++) {
-            view.setUint8(offset + i, string.charCodeAt(i));
+                result: result 
+            });
+        } catch (error) {
+            // final送信時のFetchエラー（タイムアウト）対策
+            if (type === 'final') {
+                self.postMessage({ 
+                    status: 'success', 
+                    type: 'final', 
+                    index: index, 
+                    result: { status: "timeout_but_proceed" } 
+                });
+            } else {
+                self.postMessage({ status: 'error', type: type, error: error.message });
+            }
         }
     };
-    writeString(0, 'RIFF');
-    view.setUint32(4, 32 + samples.length * 2, true);
-    writeString(8, 'WAVE');
-    writeString(12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeString(36, 'data');
-    view.setUint32(40, samples.length * 2, true);
-    let offset = 44;
-    for (let i = 0; i < samples.length; i++, offset += 2) {
-        let s = Math.max(-1, Math.min(1, samples[i]));
-        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-    }
-    return buffer;
-}
+};
 
-function arrayBufferToBase64(buffer) {
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(bytes[i]);
+/**
+ * ★ 新規：lamejsを使用したMP3変換関数
+ */
+function encodeMP3(samples, sampleRate) {
+    const mp3encoder = new lamejs.Mp3Encoder(1, sampleRate, 128); // モノラル, 128kbps
+    const mp3Data = [];
+
+    // Float32Array (-1.0 ~ 1.0) を Int16Array (-32768 ~ 32767) に変換
+    const int16Samples = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+        let s = Math.max(-1, Math.min(1, samples[i]));
+        int16Samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
     }
-    return btoa(binary);
+
+    // MP3エンコード
+    const mp3Tmp = mp3encoder.encodeBuffer(int16Samples);
+    if (mp3Tmp.length > 0) {
+        mp3Data.push(mp3Tmp);
+    }
+
+    // 終了処理
+    const mp3Exit = mp3encoder.flush();
+    if (mp3Exit.length > 0) {
+        mp3Data.push(mp3Exit);
+    }
+
+    return new Blob(mp3Data, { type: 'audio/mp3' });
 }
