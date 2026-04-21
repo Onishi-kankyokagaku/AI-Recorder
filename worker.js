@@ -1,8 +1,7 @@
 importScripts('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.all.min.js');
 
 self.onmessage = async (e) => {
-    // ★ 修正ポイント1: logRow を受け取り項目に追加
-    const { type, gasUrl, ssId, index, logRow } = e.data;
+    const { type, gasUrl, ssId, index, logRow, floatArray, sampleRate } = e.data;
 
     // --- [Step 1: SS発行（初期化）] ---
     if (type === 'init') {
@@ -19,98 +18,106 @@ self.onmessage = async (e) => {
         return; 
     }
 
-    // ★ 録音開始ボタンが押された時の通知処理
+    // --- [録音開始の通知] ---
     if (type === 'recording') {
         try {
             fetch(gasUrl, {
                 method: 'POST',
-                body: JSON.stringify({ 
-                    type: 'recording', 
-                    logRow: logRow 
-                })
+                body: JSON.stringify({ type: 'recording', logRow: logRow })
             });
         } catch (error) {
             console.error("Recording status update error:", error);
         }
-        return; 
+        return;
     }
     
     // --- [通常録音の送信] ---
-    const { floatArray, sampleRate } = e.data;
-    
     if (!floatArray) {
         self.postMessage({ status: 'error', type: type, error: "音声データが空です" });
         return;
     }
 
-    // ★ 修正ポイント：WAVではなく、本物のMP3に変換を実行
-    const mp3Blob = encodeMP3(floatArray, sampleRate);
+    // 1. MP3変換を実行（同期処理として計算）
+    const mp3Data = encodeMP3(floatArray, sampleRate);
     
-    // BlobをBase64に変換して送信
-    const reader = new FileReader();
-    reader.readAsDataURL(mp3Blob);
-    reader.onloadend = async () => {
-        const base64Audio = reader.result.split(',')[1];
+    // 2. Base64変換（FileReaderを使わず、以前の確実な手法に合わせる）
+    const base64Audio = arrayBufferToBase64(mp3Data);
 
-        try {
-            const response = await fetch(gasUrl, {
-                method: 'POST',
-                body: JSON.stringify({
-                    type: type,
-                    index: index,
-                    ssId: ssId,
-                    logRow: logRow,
-                    audio: base64Audio
-                })
-            });
-            const result = await response.json();
+    try {
+        const response = await fetch(gasUrl, {
+            method: 'POST',
+            body: JSON.stringify({
+                type: type,
+                index: index,
+                ssId: ssId,
+                logRow: logRow,
+                audio: base64Audio
+            })
+        });
+        const result = await response.json();
+        
+        // ここでしっかりメイン画面に「成功」を伝える
+        self.postMessage({ 
+            status: 'success', 
+            type: type, 
+            index: index,
+            result: result 
+        });
+    } catch (error) {
+        // final時のタイムアウト対策
+        if (type === 'final') {
             self.postMessage({ 
                 status: 'success', 
-                type: type, 
-                index: index,
-                result: result 
+                type: 'final', 
+                index: index, 
+                result: { status: "timeout_but_proceed" } 
             });
-        } catch (error) {
-            // final送信時のFetchエラー（タイムアウト）対策
-            if (type === 'final') {
-                self.postMessage({ 
-                    status: 'success', 
-                    type: 'final', 
-                    index: index, 
-                    result: { status: "timeout_but_proceed" } 
-                });
-            } else {
-                self.postMessage({ status: 'error', type: type, error: error.message });
-            }
+        } else {
+            self.postMessage({ status: 'error', type: type, error: error.message });
         }
-    };
+    }
 };
 
 /**
- * ★ 新規：lamejsを使用したMP3変換関数
+ * MP3エンコード関数（ArrayBufferを返す）
  */
 function encodeMP3(samples, sampleRate) {
-    const mp3encoder = new lamejs.Mp3Encoder(1, sampleRate, 128); // モノラル, 128kbps
+    const mp3encoder = new lamejs.Mp3Encoder(1, sampleRate, 128);
     const mp3Data = [];
 
-    // Float32Array (-1.0 ~ 1.0) を Int16Array (-32768 ~ 32767) に変換
     const int16Samples = new Int16Array(samples.length);
     for (let i = 0; i < samples.length; i++) {
         let s = Math.max(-1, Math.min(1, samples[i]));
         int16Samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
     }
 
-    // MP3エンコード
     const mp3Tmp = mp3encoder.encodeBuffer(int16Samples);
-    if (mp3Tmp.length > 0) {
-        mp3Data.push(mp3Tmp);
-    }
+    if (mp3Tmp.length > 0) mp3Data.push(mp3Tmp);
 
-    // 終了処理
     const mp3Exit = mp3encoder.flush();
-    if (mp3Exit.length > 0) {
-        mp3Data.push(mp3Exit);
-    }
+    if (mp3Exit.length > 0) mp3Data.push(mp3Exit);
 
-    return new Blob(mp3Data, { type: 'audio/mp3' });
+    // 複数のUint8Arrayを一つのUint8Arrayに結合して返す
+    let totalLength = 0;
+    for (const buf of mp3Data) totalLength += buf.length;
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const buf of mp3Data) {
+        result.set(buf, offset);
+        offset += buf.length;
+    }
+    return result.buffer;
+}
+
+/**
+ * 以前のコードで実績のあるBase64変換関数
+ */
+function arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
 }
