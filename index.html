@@ -240,10 +240,10 @@ worker.onmessage = (e) => {
         rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
         
         rec.onstop = async () => {
-            // ★修正点1: 送信中なら完了を待つ（0.5秒ごとに再チェック）
+            // ★修正点1: 送信中なら完了を待つ（5秒ごとに再チェック）
             if (isSending) {
                 log("前回の送信が完了するのを待っています...");
-                setTimeout(() => rec.onstop(), 500);
+                setTimeout(() => rec.onstop(), 5000);
                 return;
             }
     
