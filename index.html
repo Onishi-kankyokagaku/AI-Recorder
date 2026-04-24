@@ -186,14 +186,14 @@
     // --- ③ Workerの設定と初期化リクエスト ---
     worker = new Worker('worker.js');
 
-    worker.onmessage = (e) => {
+worker.onmessage = (e) => {
         const data = e.data;
 
-        // ★追加：通信が発生するタイプなら、成否に関わらずフラグを解除
+        // 通信フラグの解除（これは全タイプ共通でOK）
         if (data.type === 'memo' || data.type === 'final' || data.type === 'recording') {
             isSending = false;
         }
-        
+
         if (data.status === 'success') {
             if (data.type === 'init') {
                 currentSsId = data.result.ssId;
@@ -204,26 +204,27 @@
                 log("スプレッドシートを確保しました");
                 return;
             }
+            
             if (data.type === 'final') {
                 status.innerHTML = `<h3>✨ 議事録が完成しました</h3>`;
                 status.innerHTML += `<a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>`;
                 status.innerHTML += `<p style="margin-top: 15px; font-size: 0.9rem; color: #666;">※議事録上部のボタンからダウンロード可能です。</p>`;                
                 log("全工程が完了しました。");
 
-                // --- ★追加：ここで初めて全部解除！ ---
                 silentAudio.pause();
                 silentAudio.currentTime = 0;
                 if (wakeLock !== null) {
                     wakeLock.release().then(() => { wakeLock = null; });
                 }                
-                
-                // 完了後は離脱警告を解除
                 window.onbeforeunload = null;
-            } else {
+            } 
+            // ★ここを修正：'memo'（音声送信）のときだけ No.XX を出すように限定します
+            else if (data.type === 'memo') {
                 log(`No.${data.index} 転記完了`);
             }
+            // 'recording' 通知の成功時は、ログを出さずにスルーします
         } else {
-            log(`エラー: ${data.error}`);
+            log(`エラー (${data.type}): ${data.error}`);
         }
     };
 
