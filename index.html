@@ -188,6 +188,12 @@
 
     worker.onmessage = (e) => {
         const data = e.data;
+
+        // ★追加：通信が発生するタイプなら、成否に関わらずフラグを解除
+        if (data.type === 'memo' || data.type === 'final' || data.type === 'recording') {
+            isSending = false;
+        }
+        
         if (data.status === 'success') {
             if (data.type === 'init') {
                 currentSsId = data.result.ssId;
