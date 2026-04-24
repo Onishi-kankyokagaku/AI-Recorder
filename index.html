@@ -128,7 +128,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.7</span>
+        <span id="version-tag">Ver. 1.1.8</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -156,6 +156,8 @@
     const startBtn = document.getElementById('start');
     const stopBtn = document.getElementById('stop');
     const silentAudio = document.getElementById('silent-audio'); // 要素を取得
+
+    let isSending = false;
 
     // --- ① 初期状態の設定 ---
     startBtn.disabled = true;
@@ -231,17 +233,29 @@
         rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
         
         rec.onstop = async () => {
+            // ★修正点1: 送信中なら完了を待つ（0.5秒ごとに再チェック）
+            if (isSending) {
+                log("前回の送信が完了するのを待っています...");
+                setTimeout(() => rec.onstop(), 500);
+                return;
+            }
+    
+            if (chunks.length === 0) return;
+    
             sendCount++; 
             let currentIndex = sendCount; 
             let sendType = isFinalAction ? "final" : "memo"; 
-
-            if (chunks.length === 0) return;
+    
             const blob = new Blob(chunks, { type: 'audio/webm' });
             const arrayBuffer = await blob.arrayBuffer();
             
             if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
                 log(`No.${currentIndex} 送信開始...`);
+                
+                // ★修正点2: 送信開始時にフラグを立てる
+                isSending = true; 
+    
                 const floatArray = buffer.getChannelData(0);
                 worker.postMessage({
                     floatArray: floatArray,
