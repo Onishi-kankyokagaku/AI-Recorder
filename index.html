@@ -124,6 +124,24 @@
             font-weight: bold;
             
         }
+
+    /* エラー発生時に画面全体をじわじわ赤く明滅させる */
+    .system-error {
+        background: #ffebee !important; /* 薄い赤 */
+        animation: error-flash 1.2s infinite alternate ease-in-out;
+    }
+    @keyframes error-flash {
+        0% { background: #ffebee; }
+        100% { background: #ffcdd2; } /* やや濃い赤 */
+    }
+    
+    /* ステータス表示エリアを真っ白な警告枠に変更 */
+    .error-status-text {
+        color: #d32f2f !important;
+        border: 3px solid #d32f2f !important;
+        background: #ffffff !important;
+        box-shadow: 0 0 15px rgba(211, 47, 47, 0.2) !important;
+    }
     </style>
 </head>
 <body>
@@ -183,6 +201,37 @@
         }
     };
 
+function triggerNetworkErrorScreen(type, errorMsg) {
+        log(`通信エラー発生 (${type}): ${errorMsg}`);
+        document.body.classList.add('system-error');
+        status.classList.add('error-status-text');
+        status.innerHTML = `
+            <div style="text-align:center; padding: 10px;">
+                <span style="font-size: 1.8rem; font-weight: bold;">⚠️ 通信エラー発生 (${type})</span><br><br>
+                <strong style="color:#d32f2f; font-size: 1.1rem;">データの送信・接続に失敗しました。</strong><br>
+                <span style="font-size:0.9rem; color:#333;">電波環境の良い場所へ移動するか、Wi-Fiを確認してください。</span>
+            </div>
+            <hr style="border: 0; border-top: 1px solid #d32f2f; margin: 15px 0;">
+            <span style="font-size:0.75rem; color:#777;">[エラー詳細]: ${errorMsg}</span>
+        `;
+
+        // 3分タイマーとマイクを強制終了して被害を食い止める
+        clearInterval(timer);
+        if (rec && rec.state !== "inactive") {
+            rec.stop();
+            rec.stream.getTracks().forEach(track => track.stop());
+        }
+
+        // 🎵 【追加】無音連続再生をしっかりと停止・リセットする
+        if (typeof silentAudio !== 'undefined' && silentAudio) {
+            silentAudio.pause();
+            silentAudio.currentTime = 0;
+        }
+
+        startBtn.classList.remove('recording-active');
+        startBtn.innerText = "● 録音停止（エラー検出）";
+    }
+    
     // --- ③ Workerの設定と初期化リクエスト ---
     worker = new Worker('worker.js');
 
@@ -225,6 +274,7 @@ worker.onmessage = (e) => {
             // 'recording' 通知の成功時は、ログを出さずにスルーします
         } else {
             log(`エラー (${data.type}): ${data.error}`);
+            triggerNetworkErrorScreen(data.type, data.error);
         }
     };
 
