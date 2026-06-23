@@ -4,6 +4,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta charset="UTF-8">
     <title>AI議事録レコーダー</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>    
 <style>
 
     /* 録音中のボタン：深みのある光と鼓動 */
@@ -273,18 +274,23 @@ worker.onmessage = (e) => {
                 status.innerHTML = `<h3>✨ 議事録が完成しました</h3>`;
                 status.innerHTML += `<a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>`;
                 
-                // 📊 【追加】QRコード生成APIのURLを組み立て
-                const qrApiUrl = `https://chart.googleapis.com/chart?chs=250x250&cht=qr&chl=${encodeURIComponent(currentSsUrl)}`;
-                
-                // 🖼️ 【追加】他端末へ移すためのQRコードエリアをボタンの下に配置
+                // 🖼️ QRコードを表示するための「器（コンテナ）」を配置します（※imgタグではなくdivタグにします）
                 status.innerHTML += `
                     <div class="qr-container" style="margin: 20px auto; padding: 15px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); display: inline-block; text-align: center;">
                         <p style="margin: 0 0 10px 0; font-size: 0.85rem; color: #333; font-weight: bold;">
                             📸 PCやスマホでスキャンして手元で開く
                         </p>
-                        <img src="${qrApiUrl}" alt="議事録URLのQRコード" width="200" height="200" style="display: block; margin: 0 auto;">
+                        <div id="qrcode" style="display: flex; justify-content: center;"></div>
                     </div>
                 `;
+                
+                // 📊 【変更】ライブラリを使って、上記で作った「#qrcode」の中に動的にQRコードを描画します
+                new QRCode(document.getElementById("qrcode"), {
+                    text: currentSsUrl,
+                    width: 200,
+                    height: 200,
+                    correctLevel: QRCode.CorrectLevel.H // 読み取り精度「高」
+                });
                 
                 status.innerHTML += `<p style="margin-top: 15px; font-size: 0.9rem; color: #666;">※議事録上部のボタンからダウンロード可能です。</p>`;                
                 log("全工程が完了しました。");
@@ -295,7 +301,8 @@ worker.onmessage = (e) => {
                     wakeLock.release().then(() => { wakeLock = null; });
                 }                
                 window.onbeforeunload = null;
-            } 
+            }
+    
             // ★ここを修正：'memo'（音声送信）のときだけ No.XX を出すように限定します
             else if (data.type === 'memo') {
                 log(`No.${data.index} 転記完了`);
