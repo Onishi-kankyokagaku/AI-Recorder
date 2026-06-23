@@ -274,7 +274,7 @@ worker.onmessage = (e) => {
                 status.innerHTML = `<h3>✨ 議事録が完成しました</h3>`;
                 status.innerHTML += `<a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>`;
                 
-                // 🖼️ QRコードを表示するための「器（コンテナ）」を配置します（※imgタグではなくdivタグにします）
+                // 🖼️ 器（コンテナ）を用意
                 status.innerHTML += `
                     <div class="qr-container" style="margin: 20px auto; padding: 15px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); display: inline-block; text-align: center;">
                         <p style="margin: 0 0 10px 0; font-size: 0.85rem; color: #333; font-weight: bold;">
@@ -284,12 +284,17 @@ worker.onmessage = (e) => {
                     </div>
                 `;
                 
-                // 📊 【変更】ライブラリを使って、上記で作った「#qrcode」の中に動的にQRコードを描画します
-                new QRCode(document.getElementById("qrcode"), {
+                // 📊 【確実な方式に変更】画像ではなく、ブラウザが直接描画する方式（SVG）を指定します
+                const qrcodeContainer = document.getElementById("qrcode");
+                qrcodeContainer.innerHTML = ""; // 一度中身を完全に空にする
+                
+                new QRCode(qrcodeContainer, {
                     text: currentSsUrl,
                     width: 200,
                     height: 200,
-                    correctLevel: QRCode.CorrectLevel.H // 読み取り精度「高」
+                    colorDark : "#000000",
+                    colorLight : "#ffffff",
+                    useSVG: true // ⬅️ 【重要】画像を生成するのをやめ、型崩れしないベクトルデータ（SVG）で強制描画します
                 });
                 
                 status.innerHTML += `<p style="margin-top: 15px; font-size: 0.9rem; color: #666;">※議事録上部のボタンからダウンロード可能です。</p>`;                
