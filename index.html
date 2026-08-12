@@ -313,7 +313,7 @@
         };
     }
 
-    // 音声データ救出ダウンロード処理
+    // 音声データ救出ダウンロード処理（ダウンロード後にDBをクリア）
     recoverBtn.onclick = async () => {
         const request = indexedDB.open('AIRecorderDB', 1);
         request.onsuccess = (e) => {
@@ -329,6 +329,7 @@
                     return;
                 }
 
+                // 1. 各ファイルをダウンロード実行
                 items.forEach((item) => {
                     const byteCharacters = atob(item.audio);
                     const byteNumbers = new Array(byteCharacters.length);
@@ -348,10 +349,24 @@
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
                 });
-                alert(`${items.length} 件の音声ファイルをダウンロードしました。`);
+
+                // 2. ダウンロード完了後、IndexedDB 内のデータを削除（クリア）
+                const clearTx = db.transaction('audioQueue', 'readwrite');
+                const clearStore = clearTx.objectStore('audioQueue');
+                const clearReq = clearStore.clear();
+
+                clearReq.onsuccess = () => {
+                    alert(`${items.length} 件の音声ファイルをダウンロードし、端末内の一次保存データを削除しました。`);
+                    recoverBtn.style.display = 'none'; // 救出完了したのでボタンを隠す
+                };
+
+                clearReq.onerror = () => {
+                    alert(`${items.length} 件の音声ファイルをダウンロードしました。（ローカルデータの削除に失敗しました）`);
+                };
             };
         };
     };
+    
 </script>
 </body>
 </html>
