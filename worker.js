@@ -123,7 +123,7 @@ self.onmessage = async (e) => {
         const result = await fetchWithRetry(gasUrl, {
             method: 'POST',
             body: JSON.stringify(payload)
-        }, 5, 3000);
+        }, 6, 5000);
 
         // 送信成功したら IndexedDB から削除
         await deleteFromLocal(index);
