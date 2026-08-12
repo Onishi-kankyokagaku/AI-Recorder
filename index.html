@@ -52,6 +52,10 @@
     </div>
 
     <h1>AI議事録レコーダー</h1>
+    <button id="recover-btn" style="background: #ff9800; color: white; display: none;">
+        💾 未送信の音声データを端末に保存する
+    </button>
+    
     <button id="start">● 録音開始</button>
     <button id="stop" disabled>■ 停止・議事録作成</button>
     <p id="status">ステータス: 準備完了</p>
@@ -279,6 +283,67 @@ worker.onmessage = (e) => {
     document.addEventListener('visibilitychange', async () => {
         if (wakeLock !== null && document.visibilityState === 'visible') { await requestWakeLock(); }
     });
+
+const recoverBtn = document.getElementById('recover-btn');
+
+// エラー画面が表示された際、またはページ読み込み時に未送信データがあればボタンを表示
+async function checkUnsentData() {
+    const request = indexedDB.open('AIRecorderDB', 1);
+    request.onsuccess = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains('audioQueue')) return;
+        const tx = db.transaction('audioQueue', 'readonly');
+        const store = tx.objectStore('audioQueue');
+        const countReq = store.count();
+        countReq.onsuccess = () => {
+            if (countReq.result > 0) {
+                recoverBtn.style.display = 'block';
+                log(`未送信データが ${countReq.result} 件残っています。`);
+            }
+        };
+    };
+}
+
+// ボタンを押したらIndexedDBから音声を取り出してダウンロード
+recoverBtn.onclick = async () => {
+    const request = indexedDB.open('AIRecorderDB', 1);
+    request.onsuccess = (e) => {
+        const db = e.target.result;
+        const tx = db.transaction('audioQueue', 'readonly');
+        const store = tx.objectStore('audioQueue');
+        const getAllReq = store.getAll();
+
+        getAllReq.onsuccess = () => {
+            const items = getAllReq.result;
+            if (items.length === 0) {
+                alert("救出できるデータはありません。");
+                return;
+            }
+
+            items.forEach((item) => {
+                // Base64からBlob(MP3)に変換
+                const byteCharacters = atob(item.audio);
+                const byteNumbers = new Array(byteCharacters.length);
+                for (let i = 0; i < byteCharacters.length; i++) {
+                    byteNumbers[i] = byteCharacters.charCodeAt(i);
+                }
+                const byteArray = new Uint8Array(byteNumbers);
+                const blob = new Blob([byteArray], { type: 'audio/mpeg' });
+
+                // ダウンロードリンクを生成して自動クリック
+                const a = document.createElement('a');
+                a.href = URL.revokeObjectURL(blob) || URL.createObjectURL(blob);
+                a.download = `backup_part_${item.index}.mp3`;
+                a.click();
+            });
+            alert(`${items.length} 件の音声ファイルをダウンロードしました。`);
+        };
+    };
+};
+
+// ページ読み込み時にチェック
+window.addEventListener('load', checkUnsentData);
+    
 </script>
 </body>
 </html>
