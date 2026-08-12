@@ -80,6 +80,7 @@
     const startBtn = document.getElementById('start');
     const stopBtn = document.getElementById('stop');
     const silentAudio = document.getElementById('silent-audio');
+    const recoverBtn = document.getElementById('recover-btn');
 
     let isSending = false;
 
@@ -124,77 +125,80 @@
         if (silentAudio) { silentAudio.pause(); silentAudio.currentTime = 0; }
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音停止（エラー検出）";
+
+        // エラー画面時に未送信データの存在を確認してボタン表示
+        checkUnsentData();
     }
     
-    // ⬇️ 【超軽量・外部依存なし】JavaScriptだけで安全にQR(SVG)を作る関数
     function generateQRishest(text) {
         const url = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(text)}`;
         return `<img src="${url}" width="200" height="200" alt="QR Code" style="display:block; margin:0 auto; border:none;">`;
     }
 
     worker = new Worker('worker.js');
-// worker.onmessage 部分の処理をアップデート
-worker.onmessage = (e) => {
-    const data = e.data;
-    if (data.type === 'memo' || data.type === 'final' || data.type === 'recording') isSending = false;
 
-    if (data.status === 'retrying') {
-        log(`通信不安定: 再送試行中 (${data.attempt}/${data.maxRetries})...`);
-        status.innerHTML = `⚠️ 通信不安定のため再接続中 (${data.attempt}/${data.maxRetries})...録音は継続中`;
-        return;
-    }
+    worker.onmessage = (e) => {
+        const data = e.data;
+        if (data.type === 'memo' || data.type === 'final' || data.type === 'recording') isSending = false;
 
-    if (data.status === 'warning_offline') {
-        log(`No.${data.index} 通信失敗のためローカルへ保存しました`);
-        status.innerHTML = `⚠️ ネットワークエラー。パート${data.index}を端末内に一次保存しました。`;
-        return;
-    }
-
-    if (data.status === 'success') {
-        if (data.type === 'init') {
-            currentSsId = data.result.ssId;
-            currentSsUrl = data.result.url; 
-            currentLogRow = data.result.logRow;
-            startBtn.disabled = false;
-            status.innerHTML = "準備完了";
-            log("スプレッドシートを確保しました");
+        if (data.status === 'retrying') {
+            log(`通信不安定: 再送試行中 (${data.attempt}/${data.maxRetries})...`);
+            status.innerHTML = `⚠️ 通信不安定のため再接続中 (${data.attempt}/${data.maxRetries})...録音は継続中`;
             return;
         }
-        
-        if (data.type === 'final') {
-            const qrHtml = generateQRishest(currentSsUrl);
-            
-            status.innerHTML = `
-                <h3>✨ 議事録が完成しました</h3>
-                <a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>
-                <div class="qr-container">
-                    <p style="margin: 0 0 10px 0; font-size: 0.85rem; color: #333; font-weight: bold;">
-                        📸 PCやスマホでスキャンして手元で開く
-                    </p>
-                    ${qrHtml}
-                </div>
-                <p style="margin-top: 15px; font-size: 0.9rem; color: #666;">※議事録上部のボタンからダウンロード可能です。</p>
-            `;
-            log("全工程が完了しました。");
 
-            silentAudio.pause();
-            silentAudio.currentTime = 0;
-            if (wakeLock !== null) { wakeLock.release().then(() => { wakeLock = null; }); }                
-            window.onbeforeunload = null;
-        } else if (data.type === 'memo') {
-            log(`No.${data.index} 転記完了`);
-            status.innerHTML = `録音中... (Part ${data.index} 送信完了)`;
+        if (data.status === 'warning_offline') {
+            log(`No.${data.index} 通信失敗のためローカルへ保存しました`);
+            status.innerHTML = `⚠️ ネットワークエラー。パート${data.index}を端末内に一次保存しました。`;
+            checkUnsentData(); // 未送信データを検知して救出ボタンを表示
+            return;
         }
-    } else {
-        log(`エラー (${data.type}): ${data.error}`);
-        // 決定的なエラーの場合のみ画面切替
-        triggerNetworkErrorScreen(data.type, data.error);
-    }
-};
+
+        if (data.status === 'success') {
+            if (data.type === 'init') {
+                currentSsId = data.result.ssId;
+                currentSsUrl = data.result.url; 
+                currentLogRow = data.result.logRow;
+                startBtn.disabled = false;
+                status.innerHTML = "準備完了";
+                log("スプレッドシートを確保しました");
+                return;
+            }
+            
+            if (data.type === 'final') {
+                const qrHtml = generateQRishest(currentSsUrl);
+                
+                status.innerHTML = `
+                    <h3>✨ 議事録が完成しました</h3>
+                    <a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>
+                    <div class="qr-container">
+                        <p style="margin: 0 0 10px 0; font-size: 0.85rem; color: #333; font-weight: bold;">
+                            📸 PCやスマホでスキャンして手元で開く
+                        </p>
+                        ${qrHtml}
+                    </div>
+                    <p style="margin-top: 15px; font-size: 0.9rem; color: #666;">※議事録上部のボタンからダウンロード可能です。</p>
+                `;
+                log("全工程が完了しました。");
+
+                silentAudio.pause();
+                silentAudio.currentTime = 0;
+                if (wakeLock !== null) { wakeLock.release().then(() => { wakeLock = null; }); }                
+                window.onbeforeunload = null;
+            } else if (data.type === 'memo') {
+                log(`No.${data.index} 転記完了`);
+                status.innerHTML = `録音中... (Part ${data.index} 送信完了)`;
+            }
+        } else {
+            log(`エラー (${data.type}): ${data.error}`);
+            triggerNetworkErrorScreen(data.type, data.error);
+        }
+    };
 
     window.onload = () => {
         log("SS発行リクエスト送信...");
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
+        checkUnsentData();
     };
 
     const startSegment = async (stream) => {
@@ -284,66 +288,63 @@ worker.onmessage = (e) => {
         if (wakeLock !== null && document.visibilityState === 'visible') { await requestWakeLock(); }
     });
 
-const recoverBtn = document.getElementById('recover-btn');
-
-// エラー画面が表示された際、またはページ読み込み時に未送信データがあればボタンを表示
-async function checkUnsentData() {
-    const request = indexedDB.open('AIRecorderDB', 1);
-    request.onsuccess = (e) => {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains('audioQueue')) return;
-        const tx = db.transaction('audioQueue', 'readonly');
-        const store = tx.objectStore('audioQueue');
-        const countReq = store.count();
-        countReq.onsuccess = () => {
-            if (countReq.result > 0) {
-                recoverBtn.style.display = 'block';
-                log(`未送信データが ${countReq.result} 件残っています。`);
-            }
-        };
-    };
-}
-
-// ボタンを押したらIndexedDBから音声を取り出してダウンロード
-recoverBtn.onclick = async () => {
-    const request = indexedDB.open('AIRecorderDB', 1);
-    request.onsuccess = (e) => {
-        const db = e.target.result;
-        const tx = db.transaction('audioQueue', 'readonly');
-        const store = tx.objectStore('audioQueue');
-        const getAllReq = store.getAll();
-
-        getAllReq.onsuccess = () => {
-            const items = getAllReq.result;
-            if (items.length === 0) {
-                alert("救出できるデータはありません。");
-                return;
-            }
-
-            items.forEach((item) => {
-                // Base64からBlob(MP3)に変換
-                const byteCharacters = atob(item.audio);
-                const byteNumbers = new Array(byteCharacters.length);
-                for (let i = 0; i < byteCharacters.length; i++) {
-                    byteNumbers[i] = byteCharacters.charCodeAt(i);
+    // 未送信データのチェック関数
+    async function checkUnsentData() {
+        const request = indexedDB.open('AIRecorderDB', 1);
+        request.onsuccess = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains('audioQueue')) return;
+            const tx = db.transaction('audioQueue', 'readonly');
+            const store = tx.objectStore('audioQueue');
+            const countReq = store.count();
+            countReq.onsuccess = () => {
+                if (countReq.result > 0) {
+                    recoverBtn.style.display = 'block';
+                    log(`未送信データが ${countReq.result} 件残っています。`);
                 }
-                const byteArray = new Uint8Array(byteNumbers);
-                const blob = new Blob([byteArray], { type: 'audio/mpeg' });
+            };
+        };
+    }
 
-                // ダウンロードリンクを生成して自動クリック
-                const a = document.createElement('a');
-                a.href = URL.revokeObjectURL(blob) || URL.createObjectURL(blob);
-                a.download = `backup_part_${item.index}.mp3`;
-                a.click();
-            });
-            alert(`${items.length} 件の音声ファイルをダウンロードしました。`);
+    // 音声データ救出ダウンロード処理
+    recoverBtn.onclick = async () => {
+        const request = indexedDB.open('AIRecorderDB', 1);
+        request.onsuccess = (e) => {
+            const db = e.target.result;
+            const tx = db.transaction('audioQueue', 'readonly');
+            const store = tx.objectStore('audioQueue');
+            const getAllReq = store.getAll();
+
+            getAllReq.onsuccess = () => {
+                const items = getAllReq.result;
+                if (items.length === 0) {
+                    alert("救出できるデータはありません。");
+                    return;
+                }
+
+                items.forEach((item) => {
+                    const byteCharacters = atob(item.audio);
+                    const byteNumbers = new Array(byteCharacters.length);
+                    for (let i = 0; i < byteCharacters.length; i++) {
+                        byteNumbers[i] = byteCharacters.charCodeAt(i);
+                    }
+                    const byteArray = new Uint8Array(byteNumbers);
+                    const blob = new Blob([byteArray], { type: 'audio/mpeg' });
+
+                    // URL生成とダウンロード
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `backup_part_${item.index}.mp3`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                });
+                alert(`${items.length} 件の音声ファイルをダウンロードしました。`);
+            };
         };
     };
-};
-
-// ページ読み込み時にチェック
-window.addEventListener('load', checkUnsentData);
-    
 </script>
 </body>
 </html>
