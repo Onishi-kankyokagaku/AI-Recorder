@@ -139,7 +139,11 @@
 
     worker.onmessage = (e) => {
         const data = e.data;
-        if (data.type === 'memo' || data.type === 'final' || data.type === 'recording') isSending = false;
+        
+        // リトライ中の通知以外（＝何らかの最終応答が返ったとき）は送信中フラグを解除
+        if (data.status !== 'retrying') {
+            isSending = false;
+        }
 
         if (data.status === 'retrying') {
             log(`通信不安定: 再送試行中 (${data.attempt}/${data.maxRetries})...`);
