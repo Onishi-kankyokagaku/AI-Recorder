@@ -129,50 +129,64 @@
     }
 
     worker = new Worker('worker.js');
-    worker.onmessage = (e) => {
-        const data = e.data;
-        if (data.type === 'memo' || data.type === 'final' || data.type === 'recording') isSending = false;
+// worker.onmessage 部分の処理をアップデート
+worker.onmessage = (e) => {
+    const data = e.data;
+    if (data.type === 'memo' || data.type === 'final' || data.type === 'recording') isSending = false;
 
-        if (data.status === 'success') {
-            if (data.type === 'init') {
-                currentSsId = data.result.ssId;
-                currentSsUrl = data.result.url; 
-                currentLogRow = data.result.logRow;
-                startBtn.disabled = false;
-                status.innerHTML = "準備完了";
-                log("スプレッドシートを確保しました");
-                return;
-            }
-            
-            if (data.type === 'final') {
-                // 確実に表示できる外部API経由のクリーンな画像生成タグを使用
-                const qrHtml = generateQRishest(currentSsUrl);
-                
-                status.innerHTML = `
-                    <h3>✨ 議事録が完成しました</h3>
-                    <a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>
-                    <div class="qr-container">
-                        <p style="margin: 0 0 10px 0; font-size: 0.85rem; color: #333; font-weight: bold;">
-                            📸 PCやスマホでスキャンして手元で開く
-                        </p>
-                        ${qrHtml}
-                    </div>
-                    <p style="margin-top: 15px; font-size: 0.9rem; color: #666;">※議事録上部のボタンからダウンロード可能です。</p>
-                `;
-                log("全工程が完了しました。");
+    if (data.status === 'retrying') {
+        log(`通信不安定: 再送試行中 (${data.attempt}/${data.maxRetries})...`);
+        status.innerHTML = `⚠️ 通信不安定のため再接続中 (${data.attempt}/${data.maxRetries})...録音は継続中`;
+        return;
+    }
 
-                silentAudio.pause();
-                silentAudio.currentTime = 0;
-                if (wakeLock !== null) { wakeLock.release().then(() => { wakeLock = null; }); }                
-                window.onbeforeunload = null;
-            } else if (data.type === 'memo') {
-                log(`No.${data.index} 転記完了`);
-            }
-        } else {
-            log(`エラー (${data.type}): ${data.error}`);
-            triggerNetworkErrorScreen(data.type, data.error);
+    if (data.status === 'warning_offline') {
+        log(`No.${data.index} 通信失敗のためローカルへ保存しました`);
+        status.innerHTML = `⚠️ ネットワークエラー。パート${data.index}を端末内に一次保存しました。`;
+        return;
+    }
+
+    if (data.status === 'success') {
+        if (data.type === 'init') {
+            currentSsId = data.result.ssId;
+            currentSsUrl = data.result.url; 
+            currentLogRow = data.result.logRow;
+            startBtn.disabled = false;
+            status.innerHTML = "準備完了";
+            log("スプレッドシートを確保しました");
+            return;
         }
-    };
+        
+        if (data.type === 'final') {
+            const qrHtml = generateQRishest(currentSsUrl);
+            
+            status.innerHTML = `
+                <h3>✨ 議事録が完成しました</h3>
+                <a href="${currentSsUrl}" target="_blank" class="ss-link">議事録を確認する ↗</a>
+                <div class="qr-container">
+                    <p style="margin: 0 0 10px 0; font-size: 0.85rem; color: #333; font-weight: bold;">
+                        📸 PCやスマホでスキャンして手元で開く
+                    </p>
+                    ${qrHtml}
+                </div>
+                <p style="margin-top: 15px; font-size: 0.9rem; color: #666;">※議事録上部のボタンからダウンロード可能です。</p>
+            `;
+            log("全工程が完了しました。");
+
+            silentAudio.pause();
+            silentAudio.currentTime = 0;
+            if (wakeLock !== null) { wakeLock.release().then(() => { wakeLock = null; }); }                
+            window.onbeforeunload = null;
+        } else if (data.type === 'memo') {
+            log(`No.${data.index} 転記完了`);
+            status.innerHTML = `録音中... (Part ${data.index} 送信完了)`;
+        }
+    } else {
+        log(`エラー (${data.type}): ${data.error}`);
+        // 決定的なエラーの場合のみ画面切替
+        triggerNetworkErrorScreen(data.type, data.error);
+    }
+};
 
     window.onload = () => {
         log("SS発行リクエスト送信...");
