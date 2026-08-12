@@ -1,16 +1,77 @@
 importScripts('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.all.min.js');
 
+// --- IndexedDB ヘルパー (Worker内) ---
+const DB_NAME = 'AIRecorderDB';
+const STORE_NAME = 'audioQueue';
+
+function openDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, 1);
+        request.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME, { keyPath: 'index' });
+            }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function saveToLocal(item) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        store.put(item);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+async function deleteFromLocal(index) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        store.delete(index);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+// --- リトライ機能付き fetch ---
+async function fetchWithRetry(url, options, maxRetries = 5, initialDelay = 3000) {
+    let delay = initialDelay;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const response = await fetch(url, options);
+            if (response.ok) {
+                const json = await response.json();
+                return json;
+            }
+            throw new Error(`HTTP Error: ${response.status}`);
+        } catch (err) {
+            if (attempt === maxRetries) throw err;
+            // メイン側にリトライ状態を通知
+            self.postMessage({ status: 'retrying', attempt: attempt, maxRetries: maxRetries, error: err.message });
+            await new Promise(r => setTimeout(r, delay));
+            delay *= 2; // 指数バックオフ
+        }
+    }
+}
+
+// メッセージ受信用
 self.onmessage = async (e) => {
     const { type, gasUrl, ssId, index, logRow, floatArray, sampleRate } = e.data;
 
     // --- [Step 1: SS発行（初期化）] ---
     if (type === 'init') {
         try {
-            const response = await fetch(gasUrl, {
+            const result = await fetchWithRetry(gasUrl, {
                 method: 'POST',
                 body: JSON.stringify({ type: 'init' })
-            });
-            const result = await response.json();
+            }, 3, 2000);
             self.postMessage({ status: 'success', type: 'init', result: result });
         } catch (error) {
             self.postMessage({ status: 'error', type: 'init', error: error.message });
@@ -21,12 +82,10 @@ self.onmessage = async (e) => {
     // --- [録音開始の通知] ---
     if (type === 'recording') {
         try {
-            // ★awaitを追加して送信完了を待つ
-            await fetch(gasUrl, {
+            await fetchWithRetry(gasUrl, {
                 method: 'POST',
                 body: JSON.stringify({ type: 'recording', logRow: logRow })
-            });
-            // 送信完了を通知（メイン側のフラグ解除用）
+            }, 3, 2000);
             self.postMessage({ status: 'success', type: 'recording' });
         } catch (error) {
             console.error("Recording status update error:", error);
@@ -34,7 +93,7 @@ self.onmessage = async (e) => {
         }
         return;
     }
-    
+
     // --- [通常録音・最終録音の送信] ---
     if (!floatArray) {
         self.postMessage({ status: 'error', type: type, index: index, error: "音声データが空です" });
@@ -44,19 +103,31 @@ self.onmessage = async (e) => {
     const mp3Data = encodeMP3(floatArray, sampleRate);
     const base64Audio = arrayBufferToBase64(mp3Data);
 
+    const payload = {
+        type: type,
+        index: index,
+        ssId: ssId,
+        logRow: logRow,
+        audio: base64Audio
+    };
+
+    // 1. IndexedDB に一次保存
     try {
-        const response = await fetch(gasUrl, {
+        await saveToLocal(payload);
+    } catch (dbErr) {
+        console.warn("IndexedDBへの保存に失敗しました:", dbErr);
+    }
+
+    // 2. GASへ送信（自動リトライ付き）
+    try {
+        const result = await fetchWithRetry(gasUrl, {
             method: 'POST',
-            body: JSON.stringify({
-                type: type,
-                index: index,
-                ssId: ssId,
-                logRow: logRow,
-                audio: base64Audio
-            })
-        });
-        const result = await response.json();
-        
+            body: JSON.stringify(payload)
+        }, 5, 3000);
+
+        // 送信成功したら IndexedDB から削除
+        await deleteFromLocal(index);
+
         self.postMessage({ 
             status: 'success', 
             type: type, 
@@ -64,26 +135,16 @@ self.onmessage = async (e) => {
             result: result 
         });
     } catch (error) {
-        // ★エラー時も必ず postMessage を行い、メイン側の isSending 解除を助ける
-        if (type === 'final') {
-            self.postMessage({ 
-                status: 'success', 
-                type: 'final', 
-                index: index, 
-                result: { status: "timeout_but_proceed" } 
-            });
-        } else {
-            self.postMessage({ 
-                status: 'error', 
-                type: type, 
-                index: index, // indexを含めるとメイン側で追いやすい
-                error: error.message 
-            });
-        }
+        // リトライオーバー時：ローカルには保存されているため失敗を返して次に備える
+        self.postMessage({ 
+            status: 'warning_offline', 
+            type: type, 
+            index: index, 
+            error: "通信障害のため一時保存されました。後ほど自動再送されます。" 
+        });
     }
 };
 
-// --- encodeMP3, arrayBufferToBase64 は変更なし ---
 function encodeMP3(samples, sampleRate) {
     const mp3encoder = new lamejs.Mp3Encoder(1, sampleRate, 128);
     const mp3Data = [];
