@@ -41,7 +41,7 @@ async function deleteFromLocal(index) {
 }
 
 // --- リトライ機能付き fetch ---
-async function fetchWithRetry(url, options, maxRetries = 5, initialDelay = 3000) {
+async function fetchWithRetry(url, options, maxRetries = 6, initialDelay = 5000) {
     let delay = initialDelay;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
