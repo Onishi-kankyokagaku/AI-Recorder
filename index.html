@@ -48,7 +48,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.13</span>
+        <span id="version-tag">Ver. 1.1.14</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -200,9 +200,12 @@
     };
 
     window.onload = () => {
+        // 画面更新時は確実に救出ボタンを非表示にする
+        if (recoverBtn) {
+            recoverBtn.style.display = 'none';
+        }
         log("SS発行リクエスト送信...");
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
-        checkUnsentData();
     };
 
     const startSegment = async (stream) => {
