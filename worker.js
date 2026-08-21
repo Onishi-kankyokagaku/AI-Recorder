@@ -1,6 +1,5 @@
 importScripts('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.all.min.js');
 
-// --- IndexedDB ヘルパー (Worker内) ---
 const DB_NAME = 'AIRecorderDB';
 const STORE_NAME = 'audioQueue';
 
@@ -40,8 +39,8 @@ async function deleteFromLocal(index) {
     });
 }
 
-// --- リトライ機能付き fetch ---
-async function fetchWithRetry(url, options, maxRetries = 6, initialDelay = 5000) {
+// リトライ付き fetch 関数
+async function fetchWithRetry(url, options, maxRetries = 6, initialDelay = 3000) {
     let delay = initialDelay;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -52,20 +51,19 @@ async function fetchWithRetry(url, options, maxRetries = 6, initialDelay = 5000)
             }
             throw new Error(`HTTP Error: ${response.status}`);
         } catch (err) {
-            if (attempt === maxRetries) throw err;
-            // メイン側にリトライ状態を通知
+            if (attempt === maxRetries) throw err; // 6回失敗したら catch ブロックへ投げる
+            
             self.postMessage({ status: 'retrying', attempt: attempt, maxRetries: maxRetries, error: err.message });
             await new Promise(r => setTimeout(r, delay));
-            delay *= 2; // 指数バックオフ
+            delay *= 1.5;
         }
     }
 }
 
-// メッセージ受信用
 self.onmessage = async (e) => {
     const { type, gasUrl, ssId, index, logRow, floatArray, sampleRate } = e.data;
 
-    // --- [Step 1: SS発行（初期化）] ---
+    // --- [初期化] ---
     if (type === 'init') {
         try {
             const result = await fetchWithRetry(gasUrl, {
@@ -79,7 +77,7 @@ self.onmessage = async (e) => {
         return; 
     }
 
-    // --- [録音開始の通知] ---
+    // --- [録音開始通知] ---
     if (type === 'recording') {
         try {
             await fetchWithRetry(gasUrl, {
@@ -88,13 +86,12 @@ self.onmessage = async (e) => {
             }, 3, 2000);
             self.postMessage({ status: 'success', type: 'recording' });
         } catch (error) {
-            console.error("Recording status update error:", error);
             self.postMessage({ status: 'error', type: 'recording', error: error.message });
         }
         return;
     }
 
-    // --- [通常録音・最終録音の送信] ---
+    // --- [音声送信処理] ---
     if (!floatArray) {
         self.postMessage({ status: 'error', type: type, index: index, error: "音声データが空です" });
         return;
@@ -111,21 +108,21 @@ self.onmessage = async (e) => {
         audio: base64Audio
     };
 
-    // 1. IndexedDB に一次保存
+    // 1. まずローカル(IndexedDB)へ退避保存
     try {
         await saveToLocal(payload);
     } catch (dbErr) {
-        console.warn("IndexedDBへの保存に失敗しました:", dbErr);
+        console.warn("IndexedDB保存失敗:", dbErr);
     }
 
-    // 2. GASへ送信（自動リトライ付き）
+    // 2. GASへの送信を試みる
     try {
         const result = await fetchWithRetry(gasUrl, {
             method: 'POST',
             body: JSON.stringify(payload)
-        }, 6, 5000);
+        }, 6, 3000);
 
-        // 送信成功したら IndexedDB から削除
+        // ★送信に成功した場合のみ、ローカル保存データを消去する
         await deleteFromLocal(index);
 
         self.postMessage({ 
@@ -135,12 +132,13 @@ self.onmessage = async (e) => {
             result: result 
         });
     } catch (error) {
-        // リトライオーバー時：ローカルには保存されているため失敗を返して次に備える
+        // ★修正ポイント：6回のリトライが失敗した場合は、完全に通信諦めモードに入る。
+        // GASへは何も送信せず、ローカル保存を残したままメインスレッドへ報告する。
         self.postMessage({ 
             status: 'warning_offline', 
             type: type, 
             index: index, 
-            error: "通信障害のため一時保存されました。後ほど自動再送されます。" 
+            error: "通信障害のためGAS送信をスキップし、端末内に保存しました。" 
         });
     }
 };
