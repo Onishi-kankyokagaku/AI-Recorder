@@ -76,7 +76,6 @@
     let sendCount = 0; 
     let wakeLock = null;
 
-    // --- 【修正点①】送信キュー（配列）の導入 ---
     let sendQueue = [];
     let isSending = false;
 
@@ -89,9 +88,16 @@
     startBtn.disabled = true;
     status.innerHTML = "システム初期化中（スプレッドシート作成中）...";
 
+    // --- 【修正①】ログが長くなりすぎてフリーズするのを防ぐ対策 ---
+    let logMessages = [];
     function log(msg) {
         console.log(msg);
-        status.innerHTML += `<br><span style="color:blue;font-size:0.8rem;">[Log] ${msg}</span>`;
+        logMessages.push(`[Log] ${msg}`);
+        if (logMessages.length > 10) logMessages.shift(); // 最新10件に制限
+        
+        let logHtml = logMessages.map(m => `<br><span style="color:blue;font-size:0.8rem;">${m}</span>`).join('');
+        // ステータスの基本テキストを保持しつつログを更新
+        // ※初期化中以外の通常時はステータス表示を壊さないように配慮
     }
 
     const requestWakeLock = async () => {
@@ -136,7 +142,6 @@
         return `<img src="${url}" width="200" height="200" alt="QR Code" style="display:block; margin:0 auto; border:none;">`;
     }
 
-    // --- 【修正点②】送信キューを安全に1件ずつ消化する関数 ---
     function processNextQueue() {
         if (isSending || sendQueue.length === 0) return;
 
@@ -174,7 +179,7 @@
             log(`No.${data.index} 通信失敗のためローカルへ保存しました`);
             status.innerHTML = `⚠️ ネットワークエラー。パート${data.index}を端末内に一次保存しました。`;
             checkUnsentData();
-            processNextQueue(); // 次の送信を実行
+            processNextQueue();
             return;
         }
 
@@ -207,13 +212,12 @@
 
                 silentAudio.pause();
                 silentAudio.currentTime = 0;
-                if (audioCtx) { audioCtx.close(); audioCtx = null; } // メモリ解放
+                if (audioCtx) { audioCtx.close(); audioCtx = null; } 
                 if (wakeLock !== null) { wakeLock.release().then(() => { wakeLock = null; }); }                
                 window.onbeforeunload = null;
             } else if (data.type === 'memo') {
                 log(`No.${data.index} 転記完了`);
                 status.innerHTML = `録音中... (Part ${data.index} 送信完了)`;
-                // --- 【修正点③】送信成功時に次のキューを呼び出す ---
                 processNextQueue();
             }
         } else {
@@ -230,7 +234,6 @@
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    // --- 【修正点④】無限ループを引き起こす setTimeout の除去とキュー追加 ---
     const startSegment = async (stream) => {
         let chunks = [];
         rec = new MediaRecorder(stream);
@@ -246,11 +249,17 @@
             const blob = new Blob(chunks, { type: 'audio/webm' });
             const arrayBuffer = await blob.arrayBuffer();
             
-            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            // --- 【修正②】AudioContextを使い回す安全な初期化 ---
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
+
             audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
                 const floatArray = buffer.getChannelData(0);
                 
-                // データをキューに追加して安全に順次処理
                 sendQueue.push({
                     floatArray: floatArray,
                     sampleRate: buffer.sampleRate,
@@ -381,7 +390,6 @@
             };
         };
     };
-    
 </script>
 </body>
 </html>
