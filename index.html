@@ -239,41 +239,46 @@
         rec = new MediaRecorder(stream);
         rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
         
-        rec.onstop = async () => {
-            if (chunks.length === 0) return;
+rec.onstop = async () => {
+    if (chunks.length === 0) return;
+
+    sendCount++; 
+    let currentIndex = sendCount; 
+    let sendType = isFinalAction ? "final" : "memo"; 
+
+    const blob = new Blob(chunks, { type: 'audio/webm' });
+    chunks = []; // ★追加：旧チャンク配列を即座に空にしてメモリ解放
+
+    const arrayBuffer = await blob.arrayBuffer();
     
-            sendCount++; 
-            let currentIndex = sendCount; 
-            let sendType = isFinalAction ? "final" : "memo"; 
-    
-            const blob = new Blob(chunks, { type: 'audio/webm' });
-            const arrayBuffer = await blob.arrayBuffer();
-            
-            // --- 【修正②】AudioContextを使い回す安全な初期化 ---
-            if (!audioCtx) {
-                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            if (audioCtx.state === 'suspended') {
-                await audioCtx.resume();
-            }
+    // 次の録音セグメントをデコード処理から独立させて即座に開始
+    if (!isFinalAction) setTimeout(() => startSegment(stream), 0);
 
-            audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
-                const floatArray = buffer.getChannelData(0);
-                
-                sendQueue.push({
-                    floatArray: floatArray,
-                    sampleRate: buffer.sampleRate,
-                    type: sendType,
-                    index: currentIndex
-                });
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+    }
 
-                processNextQueue();
+    // デコード処理
+    audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+        // メモリ空間を切り出すため TypedArray を新規コピー生成して渡す
+        const channelData = buffer.getChannelData(0);
+        const floatArray = new Float32Array(channelData); 
+        
+        sendQueue.push({
+            floatArray: floatArray,
+            sampleRate: buffer.sampleRate,
+            type: sendType,
+            index: currentIndex
+        });
 
-                if (!isFinalAction) startSegment(stream);
-            });
-        };
-        rec.start();
-    };
+        processNextQueue();
+    }, (err) => {
+        log("デコードエラー: " + err.message);
+    });
+};
 
     startBtn.onclick = async () => {
         startBtn.classList.add('recording-active');
