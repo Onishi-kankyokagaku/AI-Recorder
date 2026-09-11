@@ -58,7 +58,8 @@
     
     <button id="start">● 録音開始</button>
     <button id="stop" disabled>■ 停止・議事録作成</button>
-    <p id="status">ステータス: 準備完了</p>
+    <!-- 【修正】初期表示テキストを準備中にして誤解を防ぐ -->
+    <p id="status">システム初期化中（スプレッドシート作成中）...</p>
 
     <audio id="silent-audio" loop>
         <source src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=" type="audio/wav">
@@ -86,18 +87,12 @@
     const recoverBtn = document.getElementById('recover-btn');
 
     startBtn.disabled = true;
-    status.innerHTML = "システム初期化中（スプレッドシート作成中）...";
 
-    // --- 【修正①】ログが長くなりすぎてフリーズするのを防ぐ対策 ---
     let logMessages = [];
     function log(msg) {
         console.log(msg);
         logMessages.push(`[Log] ${msg}`);
-        if (logMessages.length > 10) logMessages.shift(); // 最新10件に制限
-        
-        let logHtml = logMessages.map(m => `<br><span style="color:blue;font-size:0.8rem;">${m}</span>`).join('');
-        // ステータスの基本テキストを保持しつつログを更新
-        // ※初期化中以外の通常時はステータス表示を壊さないように配慮
+        if (logMessages.length > 10) logMessages.shift();
     }
 
     const requestWakeLock = async () => {
@@ -239,46 +234,46 @@
         rec = new MediaRecorder(stream);
         rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
         
-rec.onstop = async () => {
-    if (chunks.length === 0) return;
+        rec.onstop = async () => {
+            if (chunks.length === 0) return;
 
-    sendCount++; 
-    let currentIndex = sendCount; 
-    let sendType = isFinalAction ? "final" : "memo"; 
+            sendCount++; 
+            let currentIndex = sendCount; 
+            let sendType = isFinalAction ? "final" : "memo"; 
 
-    const blob = new Blob(chunks, { type: 'audio/webm' });
-    chunks = []; // ★追加：旧チャンク配列を即座に空にしてメモリ解放
+            const blob = new Blob(chunks, { type: 'audio/webm' });
+            chunks = []; // メモリ解放
 
-    const arrayBuffer = await blob.arrayBuffer();
-    
-    // 次の録音セグメントをデコード処理から独立させて即座に開始
-    if (!isFinalAction) setTimeout(() => startSegment(stream), 0);
+            const arrayBuffer = await blob.arrayBuffer();
+            
+            if (!isFinalAction) setTimeout(() => startSegment(stream), 0);
 
-    if (!audioCtx) {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    if (audioCtx.state === 'suspended') {
-        await audioCtx.resume();
-    }
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
 
-    // デコード処理
-    audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
-        // メモリ空間を切り出すため TypedArray を新規コピー生成して渡す
-        const channelData = buffer.getChannelData(0);
-        const floatArray = new Float32Array(channelData); 
-        
-        sendQueue.push({
-            floatArray: floatArray,
-            sampleRate: buffer.sampleRate,
-            type: sendType,
-            index: currentIndex
-        });
+            audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+                const channelData = buffer.getChannelData(0);
+                const floatArray = new Float32Array(channelData); 
+                
+                sendQueue.push({
+                    floatArray: floatArray,
+                    sampleRate: buffer.sampleRate,
+                    type: sendType,
+                    index: currentIndex
+                });
 
-        processNextQueue();
-    }, (err) => {
-        log("デコードエラー: " + err.message);
-    });
-};
+                processNextQueue();
+            }, (err) => {
+                log("デコードエラー: " + err.message);
+            });
+        }; // rec.onstop 閉じ
+
+        rec.start(); // 👈 復元：録音開始命令
+    }; // 👈 復元：startSegment 関数の閉じ
 
     startBtn.onclick = async () => {
         startBtn.classList.add('recording-active');
