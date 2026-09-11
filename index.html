@@ -291,7 +291,14 @@
             sendCount = 0; 
             sendQueue = [];
             isSending = false;
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    sampleRate: 16000,      // サンプルレートを 16kHz に抑える
+                    channelCount: 1,        // モノラル（1ch）に指定
+                    echoCancellation: true, // ノイズキャンセラー有効
+                    noiseSuppression: true  // ノイズ抑止有効
+                }
+            });
             silentAudio.play();
             startSegment(stream);
 
