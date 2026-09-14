@@ -48,7 +48,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.19</span>
+        <span id="version-tag">Ver. 1.1.20</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -58,7 +58,6 @@
     
     <button id="start">● 録音開始</button>
     <button id="stop" disabled>■ 停止・議事録作成</button>
-    <!-- 【修正】初期表示テキストを準備中にして誤解を防ぐ -->
     <p id="status">システム初期化中（スプレッドシート作成中）...</p>
 
     <audio id="silent-audio" loop>
@@ -80,10 +79,8 @@
     let sendQueue = [];
     let isSending = false;
 
-    // --- 30秒リセット＆3分バッファ管理 ---
-    let shortChunksBuffer = []; // 30秒ごとのBlobを一時保管する配列
+    let shortChunksBuffer = [];
     let currentStream = null;
-    // ------------------------------------
 
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
@@ -234,7 +231,6 @@
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    // ★核心機能：30秒ごとにMediaRecorderをstop()してインスタンスを破棄・再生成
     const startSegment = (stream) => {
         let currentChunk = [];
         rec = new MediaRecorder(stream);
@@ -245,18 +241,16 @@
 
         rec.onstop = async () => {
             if (currentChunk.length > 0) {
-                // 30秒分の小ファイルをBlobにして配列に保管
-                const 30sBlob = new Blob(currentChunk, { type: 'audio/webm' });
-                shortChunksBuffer.push(30sBlob);
+                // 【修正】変数名を 30sBlob から blob30s に変更
+                const blob30s = new Blob(currentChunk, { type: 'audio/webm' });
+                shortChunksBuffer.push(blob30s);
                 currentChunk = [];
             }
 
-            // 録音継続中であれば、新しいMediaRecorderインスタンスで次の30秒を開始
             if (!isFinalAction) {
                 setTimeout(() => startSegment(stream), 0);
             }
 
-            // 30秒×6個（＝3分間）溜まった、または「停止・議事録作成」が押された場合に結合して送信
             if (shortChunksBuffer.length >= 6 || isFinalAction) {
                 if (shortChunksBuffer.length === 0) return;
 
@@ -264,13 +258,12 @@
                 let currentIndex = sendCount;
                 let sendType = isFinalAction ? "final" : "memo";
 
-                // 30秒のWebMデータを6個連結して「3分間の1つのデータ」を作成
-                const 3minBlob = new Blob(shortChunksBuffer, { type: 'audio/webm' });
-                shortChunksBuffer = []; // バッファを即座に空にしてメモリ解放
+                // 【修正】変数名を 3minBlob から blob3min に変更
+                const blob3min = new Blob(shortChunksBuffer, { type: 'audio/webm' });
+                shortChunksBuffer = []; 
 
-                const arrayBuffer = await 3minBlob.arrayBuffer();
+                const arrayBuffer = await blob3min.arrayBuffer();
 
-                // 使い捨てのAudioContextでデコードし、完了後に速やかにclose
                 const tempAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
                 tempAudioCtx.decodeAudioData(arrayBuffer, (buffer) => {
                     const channelData = buffer.getChannelData(0);
@@ -315,16 +308,15 @@
 
             currentStream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
-                    sampleRate: 16000,      // サンプルレートを 16kHz に抑える
-                    channelCount: 1,        // モノラル（1ch）に指定
-                    echoCancellation: true, // ノイズキャンセラー有効
-                    noiseSuppression: true  // ノイズ抑止有効
+                    sampleRate: 16000,
+                    channelCount: 1,
+                    echoCancellation: true,
+                    noiseSuppression: true
                 }
             });
             silentAudio.play();
             startSegment(currentStream);
 
-            // ★30秒間隔で rec.stop() を自動実行（ブラウザ内部バッファの完全解放）
             timer = setInterval(() => {
                 if (rec && rec.state === "recording") rec.stop();
             }, 30000); 
@@ -407,7 +399,6 @@
                     URL.revokeObjectURL(url);
                 });
 
-                // ダウンロードダイアログでのキャンセル事故を防ぐため確認アラートを挟む
                 setTimeout(() => {
                     const isConfirmed = confirm(`${items.length} 件のファイルを保存用にダウンロードしました。\n\n端末内に残っている未送信データを削除してもよろしいですか？\n（キャンセルを押すとデータを残したままにします）`);
 
