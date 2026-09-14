@@ -44,28 +44,11 @@
 
     .qr-container { margin: 20px auto; padding: 15px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); display: inline-block; text-align: center; }
     .qr-container svg { display: block; margin: 0 auto; width: 200px; height: 200px; }
-
-    #debug-log {
-        margin-top: 20px;
-        background: #222;
-        color: #00ff66;
-        font-family: monospace;
-        font-size: 0.75rem;
-        text-align: left;
-        padding: 10px;
-        border-radius: 8px;
-        height: 160px;
-        overflow-y: auto;
-        word-break: break-all;
-        max-width: 400px;
-        margin-left: auto;
-        margin-right: auto;
-    }
 </style>
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.2.0 (AudioWorklet)</span>
+        <span id="version-tag">Ver. 1.1.17</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -75,9 +58,8 @@
     
     <button id="start">● 録音開始</button>
     <button id="stop" disabled>■ 停止・議事録作成</button>
+    <!-- 【修正】初期表示テキストを準備中にして誤解を防ぐ -->
     <p id="status">システム初期化中（スプレッドシート作成中）...</p>
-
-    <div id="debug-log">--- 動作ログモニター ---</div>
 
     <audio id="silent-audio" loop>
         <source src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=" type="audio/wav">
@@ -89,12 +71,7 @@
     let currentSsId = null; 
     let currentSsUrl = null; 
     let currentLogRow = null; 
-    
-    let audioCtx = null;
-    let audioSource = null;
-    let workletNode = null;
-    let mediaStream = null;
-
+    let rec = null, timer = null, audioCtx = null;
     let isFinalAction = false;
     let worker = null;
     let sendCount = 0; 
@@ -103,27 +80,19 @@
     let sendQueue = [];
     let isSending = false;
 
-    // 3分間（180秒）のバッファ（16kHz時：288万サンプル）
-    const TARGET_SAMPLE_RATE = 16000;
-    const THREE_MIN_SAMPLES = TARGET_SAMPLE_RATE * 180;
-    let pcmBuffer = new Float32Array(THREE_MIN_SAMPLES);
-    let pcmBufferOffset = 0;
-
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
     const stopBtn = document.getElementById('stop');
     const silentAudio = document.getElementById('silent-audio');
     const recoverBtn = document.getElementById('recover-btn');
-    const debugLog = document.getElementById('debug-log');
 
     startBtn.disabled = true;
 
+    let logMessages = [];
     function log(msg) {
         console.log(msg);
-        const now = new Date();
-        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-        debugLog.innerHTML += `<br>[${timeStr}] ${msg}`;
-        debugLog.scrollTop = debugLog.scrollHeight;
+        logMessages.push(`[Log] ${msg}`);
+        if (logMessages.length > 10) logMessages.shift();
     }
 
     const requestWakeLock = async () => {
@@ -151,7 +120,11 @@
             <hr style="border: 0; border-top: 1px solid #d32f2f; margin: 15px 0;">
             <span style="font-size:0.75rem; color:#777;">[エラー詳細]: ${errorMsg}</span>
         `;
-        cleanupAudio();
+        clearInterval(timer);
+        if (rec && rec.state !== "inactive") {
+            rec.stop();
+            rec.stream.getTracks().forEach(track => track.stop());
+        }
         if (silentAudio) { silentAudio.pause(); silentAudio.currentTime = 0; }
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音停止（エラー検出）";
@@ -234,7 +207,7 @@
 
                 silentAudio.pause();
                 silentAudio.currentTime = 0;
-                cleanupAudio();
+                if (audioCtx) { audioCtx.close(); audioCtx = null; } 
                 if (wakeLock !== null) { wakeLock.release().then(() => { wakeLock = null; }); }                
                 window.onbeforeunload = null;
             } else if (data.type === 'memo') {
@@ -249,6 +222,11 @@
     };
 
     window.onload = () => {
+        
+        // 起動時に一瞬だけ大きなメモリダミー領域を確保して破棄し、V8の清掃モードを起動する
+        let dummy = new ArrayBuffer(500 * 1024 * 1024); // 100MBのダミー
+        dummy = null; // 即座に参照を切って清掃対象にする
+        
         if (recoverBtn) {
             recoverBtn.style.display = 'none';
         }
@@ -256,56 +234,51 @@
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    // --- AudioWorklet インラインプロセッサコード ---
-    const workletCode = `
-        class PCMProcessor extends AudioWorkletProcessor {
-            process(inputs, outputs, parameters) {
-                const input = inputs[0];
-                if (input && input.length > 0) {
-                    const inputChannel = input[0];
-                    if (inputChannel && inputChannel.length > 0) {
-                        // 生のPCM波形(128サンプル)を即座にメインスレッドへ転送
-                        this.port.postMessage(inputChannel);
-                    }
-                }
-                return true;
+    const startSegment = async (stream) => {
+        let chunks = [];
+        rec = new MediaRecorder(stream);
+        rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+        
+        rec.onstop = async () => {
+            if (chunks.length === 0) return;
+
+            sendCount++; 
+            let currentIndex = sendCount; 
+            let sendType = isFinalAction ? "final" : "memo"; 
+
+            const blob = new Blob(chunks, { type: 'audio/webm' });
+            chunks = []; // メモリ解放
+
+            const arrayBuffer = await blob.arrayBuffer();
+            
+            if (!isFinalAction) setTimeout(() => startSegment(stream), 0);
+
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             }
-        }
-        registerProcessor('pcm-processor', PCMProcessor);
-    `;
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
 
-    // バッファをWorkerへ渡す関数
-    function flushBuffer(isFinal) {
-        if (pcmBufferOffset === 0) return;
+            audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+                const channelData = buffer.getChannelData(0);
+                const floatArray = new Float32Array(channelData); 
+                
+                sendQueue.push({
+                    floatArray: floatArray,
+                    sampleRate: buffer.sampleRate,
+                    type: sendType,
+                    index: currentIndex
+                });
 
-        sendCount++;
-        let currentIndex = sendCount;
-        let sendType = isFinal ? "final" : "memo";
+                processNextQueue();
+            }, (err) => {
+                log("デコードエラー: " + err.message);
+            });
+        }; // rec.onstop 閉じ
 
-        log(`Part ${currentIndex} (${sendType}) 送信キューへ移動 (${(pcmBufferOffset / TARGET_SAMPLE_RATE).toFixed(1)}秒分)`);
-
-        // 溜まったデータ分だけ切り出してWorkerへ
-        const floatArray = pcmBuffer.slice(0, pcmBufferOffset);
-
-        sendQueue.push({
-            floatArray: floatArray,
-            sampleRate: TARGET_SAMPLE_RATE,
-            type: sendType,
-            index: currentIndex
-        });
-
-        // メモリ位置をリセット
-        pcmBufferOffset = 0;
-        processNextQueue();
-    }
-
-    // クリーンアップ関数
-    function cleanupAudio() {
-        if (workletNode) { workletNode.disconnect(); workletNode = null; }
-        if (audioSource) { audioSource.disconnect(); audioSource = null; }
-        if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); mediaStream = null; }
-        if (audioCtx) { audioCtx.close(); audioCtx = null; }
-    }
+        rec.start(1000); // 👈 復元：録音開始命令
+    }; // 👈 復元：startSegment 関数の閉じ
 
     startBtn.onclick = async () => {
         startBtn.classList.add('recording-active');
@@ -323,60 +296,24 @@
             sendCount = 0; 
             sendQueue = [];
             isSending = false;
-            pcmBufferOffset = 0;
-
-            // 16kHz モノラル AudioContext を作成
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SAMPLE_RATE });
-
-            mediaStream = await navigator.mediaDevices.getUserMedia({ 
+            const stream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
-                    sampleRate: TARGET_SAMPLE_RATE,
-                    channelCount: 1,
-                    echoCancellation: true,
-                    noiseSuppression: true
+                    sampleRate: 16000,      // サンプルレートを 16kHz に抑える
+                    channelCount: 1,        // モノラル（1ch）に指定
+                    echoCancellation: true, // ノイズキャンセラー有効
+                    noiseSuppression: true  // ノイズ抑止有効
                 }
             });
-
-            // AudioWorklet モジュールを Blob 経由で登録
-            const blob = new Blob([workletCode], { type: 'application/javascript' });
-            const workletUrl = URL.createObjectURL(blob);
-            await audioCtx.audioWorklet.addModule(workletUrl);
-            URL.revokeObjectURL(workletUrl);
-
-            audioSource = audioCtx.createMediaStreamSource(mediaStream);
-            workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor');
-
-            // 128サンプル単位でリアルタイムに波形データを受信
-            workletNode.port.onmessage = (e) => {
-                const inputData = e.data;
-                
-                // バッファにコピー追加
-                if (pcmBufferOffset + inputData.length <= THREE_MIN_SAMPLES) {
-                    pcmBuffer.set(inputData, pcmBufferOffset);
-                    pcmBufferOffset += inputData.length;
-                }
-
-                // 3分間（288万サンプル）溜まったら送信
-                if (pcmBufferOffset >= THREE_MIN_SAMPLES) {
-                    log("3分到達: 送信処理を開始します");
-                    flushBuffer(false);
-                }
-            };
-
-            audioSource.connect(workletNode);
-            // ※ダミー出力に繋がないとブラウザによってワークレットが休止するのを防ぐ
-            const dummyGain = audioCtx.createGain();
-            dummyGain.gain.value = 0;
-            workletNode.connect(dummyGain);
-            dummyGain.connect(audioCtx.destination);
-
             silentAudio.play();
+            startSegment(stream);
+
+            timer = setInterval(() => {
+                if (rec && rec.state === "recording") rec.stop();
+            }, 180000); 
 
             startBtn.disabled = true;
             stopBtn.disabled = false;
             status.innerHTML = "録音中...";
-            log("AudioWorklet録音開始（リアルタイムバッファリング中）");
-
         } catch (err) {
             log("開始エラー: " + err.message);
         }
@@ -386,16 +323,11 @@
         isFinalAction = true;
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音開始";
-        
-        log("停止ボタンが押されました");
-
-        cleanupAudio();
-
-        // 停止ボタン押下時に残っている波形データを最終送信（final）
-        if (pcmBufferOffset > 0) {
-            flushBuffer(true);
+        clearInterval(timer);
+        if (rec && rec.state !== "inactive") {
+            rec.stop();
+            rec.stream.getTracks().forEach(track => track.stop());
         }
-
         status.innerHTML = "最終データを解析中...";
         stopBtn.disabled = true;
     };
