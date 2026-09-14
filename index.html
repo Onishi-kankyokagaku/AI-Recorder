@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <title>AI議事録レコーダー</title>
 <style>
+    /* 録音中のボタン：深みのある光と鼓動 */
     .recording-active {
         background: linear-gradient(135.2deg, #4CAF50 1.2%, #81C784 98.8%) !important;
         position: relative;
@@ -53,7 +54,7 @@
         text-align: left;
         padding: 10px;
         border-radius: 8px;
-        height: 180px;
+        height: 160px;
         overflow-y: auto;
         word-break: break-all;
         max-width: 400px;
@@ -64,7 +65,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.24</span>
+        <span id="version-tag">Ver. 1.2.0 (AudioWorklet)</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -88,7 +89,12 @@
     let currentSsId = null; 
     let currentSsUrl = null; 
     let currentLogRow = null; 
-    let rec = null, timer = null, audioCtx = null;
+    
+    let audioCtx = null;
+    let audioSource = null;
+    let workletNode = null;
+    let mediaStream = null;
+
     let isFinalAction = false;
     let worker = null;
     let sendCount = 0; 
@@ -97,8 +103,11 @@
     let sendQueue = [];
     let isSending = false;
 
-    let shortChunksBuffer = [];
-    let currentStream = null;
+    // 3分間（180秒）のバッファ（16kHz時：288万サンプル）
+    const TARGET_SAMPLE_RATE = 16000;
+    const THREE_MIN_SAMPLES = TARGET_SAMPLE_RATE * 180;
+    let pcmBuffer = new Float32Array(THREE_MIN_SAMPLES);
+    let pcmBufferOffset = 0;
 
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
@@ -142,11 +151,7 @@
             <hr style="border: 0; border-top: 1px solid #d32f2f; margin: 15px 0;">
             <span style="font-size:0.75rem; color:#777;">[エラー詳細]: ${errorMsg}</span>
         `;
-        clearInterval(timer);
-        if (rec && rec.state !== "inactive") {
-            rec.stop();
-        }
-        if (currentStream) { currentStream.getTracks().forEach(track => track.stop()); }
+        cleanupAudio();
         if (silentAudio) { silentAudio.pause(); silentAudio.currentTime = 0; }
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音停止（エラー検出）";
@@ -160,10 +165,7 @@
     }
 
     function processNextQueue() {
-        if (isSending || sendQueue.length === 0) {
-            log(`キュー確認: isSending=${isSending}, 残数=${sendQueue.length}`);
-            return;
-        }
+        if (isSending || sendQueue.length === 0) return;
 
         isSending = true;
         const task = sendQueue.shift();
@@ -232,7 +234,7 @@
 
                 silentAudio.pause();
                 silentAudio.currentTime = 0;
-                if (audioCtx) { audioCtx.close(); audioCtx = null; } 
+                cleanupAudio();
                 if (wakeLock !== null) { wakeLock.release().then(() => { wakeLock = null; }); }                
                 window.onbeforeunload = null;
             } else if (data.type === 'memo') {
@@ -254,77 +256,56 @@
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    // ★核心修正：30秒ごとにstop/startを実行し、ヘッダー付きの完全な30秒Blobを毎回生成する
-    const startSingle30sSegment = (stream) => {
-        let singleChunk = [];
-        rec = new MediaRecorder(stream);
-
-        rec.ondataavailable = (e) => {
-            if (e.data.size > 0) singleChunk.push(e.data);
-        };
-
-        rec.onstop = async () => {
-            if (singleChunk.length > 0) {
-                const blob30s = new Blob(singleChunk, { type: 'audio/webm' });
-                shortChunksBuffer.push(blob30s);
-                log(`30秒分割保存完了 (${shortChunksBuffer.length}/6個)`);
+    // --- AudioWorklet インラインプロセッサコード ---
+    const workletCode = `
+        class PCMProcessor extends AudioWorkletProcessor {
+            process(inputs, outputs, parameters) {
+                const input = inputs[0];
+                if (input && input.length > 0) {
+                    const inputChannel = input[0];
+                    if (inputChannel && inputChannel.length > 0) {
+                        // 生のPCM波形(128サンプル)を即座にメインスレッドへ転送
+                        this.port.postMessage(inputChannel);
+                    }
+                }
+                return true;
             }
-
-            // 録音中であれば、新しいインスタンスで直ちに次の30秒録音を再スタート
-            if (!isFinalAction) {
-                startSingle30sSegment(stream);
-            }
-
-            // 6個（＝3分分）溜まったら結合・送信
-            if (shortChunksBuffer.length >= 6) {
-                log("3分（6個）に達したため結合・送信を開始します");
-                await processAndSendBuffer(false);
-            }
-        };
-
-        rec.start();
-    };
-
-    const processAndSendBuffer = async (isFinal) => {
-        if (shortChunksBuffer.length === 0) {
-            log("送信対象のバッファが空のためスキップします");
-            return;
         }
+        registerProcessor('pcm-processor', PCMProcessor);
+    `;
 
-        const chunksToProcess = [...shortChunksBuffer];
-        shortChunksBuffer = []; 
+    // バッファをWorkerへ渡す関数
+    function flushBuffer(isFinal) {
+        if (pcmBufferOffset === 0) return;
 
         sendCount++;
         let currentIndex = sendCount;
         let sendType = isFinal ? "final" : "memo";
 
-        log(`Part ${currentIndex} (${sendType}) 結合処理開始... (${chunksToProcess.length}個のBlob)`);
+        log(`Part ${currentIndex} (${sendType}) 送信キューへ移動 (${(pcmBufferOffset / TARGET_SAMPLE_RATE).toFixed(1)}秒分)`);
 
-        const blob3min = new Blob(chunksToProcess, { type: 'audio/webm' });
-        const arrayBuffer = await blob3min.arrayBuffer();
+        // 溜まったデータ分だけ切り出してWorkerへ
+        const floatArray = pcmBuffer.slice(0, pcmBufferOffset);
 
-        const tempAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        log("AudioContextデコード中...");
-        
-        tempAudioCtx.decodeAudioData(arrayBuffer, (buffer) => {
-            log(`デコード成功: 長さ ${buffer.duration.toFixed(1)} 秒`);
-            const channelData = buffer.getChannelData(0);
-            const floatArray = new Float32Array(channelData);
-
-            sendQueue.push({
-                floatArray: floatArray,
-                sampleRate: buffer.sampleRate,
-                type: sendType,
-                index: currentIndex
-            });
-
-            tempAudioCtx.close();
-            processNextQueue();
-        }, (err) => {
-            log("デコードエラー: " + err.message);
-            tempAudioCtx.close();
+        sendQueue.push({
+            floatArray: floatArray,
+            sampleRate: TARGET_SAMPLE_RATE,
+            type: sendType,
+            index: currentIndex
         });
-    };
+
+        // メモリ位置をリセット
+        pcmBufferOffset = 0;
+        processNextQueue();
+    }
+
+    // クリーンアップ関数
+    function cleanupAudio() {
+        if (workletNode) { workletNode.disconnect(); workletNode = null; }
+        if (audioSource) { audioSource.disconnect(); audioSource = null; }
+        if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); mediaStream = null; }
+        if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    }
 
     startBtn.onclick = async () => {
         startBtn.classList.add('recording-active');
@@ -342,31 +323,60 @@
             sendCount = 0; 
             sendQueue = [];
             isSending = false;
-            shortChunksBuffer = [];
+            pcmBufferOffset = 0;
 
-            currentStream = await navigator.mediaDevices.getUserMedia({ 
+            // 16kHz モノラル AudioContext を作成
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SAMPLE_RATE });
+
+            mediaStream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
-                    sampleRate: 16000,
+                    sampleRate: TARGET_SAMPLE_RATE,
                     channelCount: 1,
                     echoCancellation: true,
                     noiseSuppression: true
                 }
             });
-            silentAudio.play();
-            
-            // 30秒ごとのセクション管理をスタート
-            startSingle30sSegment(currentStream);
 
-            // 30秒ごとに rec.stop() をキックするタイマー
-            timer = setInterval(() => {
-                if (rec && rec.state === "recording") {
-                    rec.stop();
+            // AudioWorklet モジュールを Blob 経由で登録
+            const blob = new Blob([workletCode], { type: 'application/javascript' });
+            const workletUrl = URL.createObjectURL(blob);
+            await audioCtx.audioWorklet.addModule(workletUrl);
+            URL.revokeObjectURL(workletUrl);
+
+            audioSource = audioCtx.createMediaStreamSource(mediaStream);
+            workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor');
+
+            // 128サンプル単位でリアルタイムに波形データを受信
+            workletNode.port.onmessage = (e) => {
+                const inputData = e.data;
+                
+                // バッファにコピー追加
+                if (pcmBufferOffset + inputData.length <= THREE_MIN_SAMPLES) {
+                    pcmBuffer.set(inputData, pcmBufferOffset);
+                    pcmBufferOffset += inputData.length;
                 }
-            }, 30000);
+
+                // 3分間（288万サンプル）溜まったら送信
+                if (pcmBufferOffset >= THREE_MIN_SAMPLES) {
+                    log("3分到達: 送信処理を開始します");
+                    flushBuffer(false);
+                }
+            };
+
+            audioSource.connect(workletNode);
+            // ※ダミー出力に繋がないとブラウザによってワークレットが休止するのを防ぐ
+            const dummyGain = audioCtx.createGain();
+            dummyGain.gain.value = 0;
+            workletNode.connect(dummyGain);
+            dummyGain.connect(audioCtx.destination);
+
+            silentAudio.play();
 
             startBtn.disabled = true;
             stopBtn.disabled = false;
             status.innerHTML = "録音中...";
+            log("AudioWorklet録音開始（リアルタイムバッファリング中）");
+
         } catch (err) {
             log("開始エラー: " + err.message);
         }
@@ -378,21 +388,13 @@
         startBtn.innerText = "● 録音開始";
         
         log("停止ボタンが押されました");
-        clearInterval(timer);
 
-        if (rec && rec.state !== "inactive") {
-            rec.stop();
-        }
-        if (currentStream) {
-            currentStream.getTracks().forEach(track => track.stop());
-        }
+        cleanupAudio();
 
-        setTimeout(async () => {
-            if (shortChunksBuffer.length > 0) {
-                log(`残りのバッファ (${shortChunksBuffer.length}個) を最終送信します`);
-                await processAndSendBuffer(true);
-            }
-        }, 500);
+        // 停止ボタン押下時に残っている波形データを最終送信（final）
+        if (pcmBufferOffset > 0) {
+            flushBuffer(true);
+        }
 
         status.innerHTML = "最終データを解析中...";
         stopBtn.disabled = true;
@@ -453,22 +455,18 @@
                     URL.revokeObjectURL(url);
                 });
 
-                setTimeout(() => {
-                    const isConfirmed = confirm(`${items.length} 件のファイルを保存用にダウンロードしました。\n\n端末内に残っている未送信データを削除してもよろしいですか？\n（キャンセルを押すとデータを残したままにします）`);
+                const clearTx = db.transaction('audioQueue', 'readwrite');
+                const clearStore = clearTx.objectStore('audioQueue');
+                const clearReq = clearStore.clear();
 
-                    if (isConfirmed) {
-                        const clearTx = db.transaction('audioQueue', 'readwrite');
-                        const clearStore = clearTx.objectStore('audioQueue');
-                        const clearReq = clearStore.clear();
+                clearReq.onsuccess = () => {
+                    alert(`${items.length} 件の音声ファイルをダウンロードし、端末内の一次保存データを削除しました。`);
+                    recoverBtn.style.display = 'none';
+                };
 
-                        clearReq.onsuccess = () => {
-                            alert("端末内の未送信データを削除しました。");
-                            recoverBtn.style.display = 'none';
-                        };
-                    } else {
-                        alert("データは削除されずに端末内に保持されています。");
-                    }
-                }, 500);
+                clearReq.onerror = () => {
+                    alert(`${items.length} 件の音声ファイルをダウンロードしました。（ローカルデータの削除に失敗しました）`);
+                };
             };
         };
     };
