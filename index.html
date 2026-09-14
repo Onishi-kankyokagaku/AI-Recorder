@@ -48,7 +48,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.21</span>
+        <span id="version-tag">Ver. 1.1.22</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -70,7 +70,7 @@
     let currentSsId = null; 
     let currentSsUrl = null; 
     let currentLogRow = null; 
-    let rec = null, timer = null, audioCtx = null;
+    let rec = null, audioCtx = null;
     let isFinalAction = false;
     let worker = null;
     let sendCount = 0; 
@@ -230,39 +230,41 @@
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    // ★改善：30秒ごとの小刻み吐き出しと正確な3分間結合ロジック
+    // ★修正：3分（6個）ごとに送信後も自動継続してパート2、パート3を処理するロジック
     const startRecordingSession = (stream) => {
         rec = new MediaRecorder(stream);
 
-        // 30秒ごとにブラウザから小分けのWebM Blobが渡される
         rec.ondataavailable = async (e) => {
             if (e.data.size > 0) {
                 shortChunksBuffer.push(e.data);
                 log(`30秒チャンク取得 (${shortChunksBuffer.length}/6個)`);
 
-                // 6個（＝180秒＝3分）溜まった、または「停止」ボタンが押された場合に結合処理
-                if (shortChunksBuffer.length >= 6 || isFinalAction) {
-                    await processAndSendBuffer();
+                // 6個（3分）に達したら送信関数を実行
+                if (shortChunksBuffer.length >= 6) {
+                    await processAndSendBuffer(false);
                 }
             }
         };
 
-        // 30秒ごとにondataavailableを発生させる
+        // 30秒ごとにデータを受け取る
         rec.start(30000);
     };
 
-    // 3分データ（または停止時のデータ）を一つに結合してWorkerへ送る関数
-    const processAndSendBuffer = async () => {
+    // バッファの結合・デコード・送信処理
+    const processAndSendBuffer = async (isFinal) => {
         if (shortChunksBuffer.length === 0) return;
+
+        // 送信対象の30秒チャンク群をコピーしてバッファを即時クリア
+        const chunksToProcess = [...shortChunksBuffer];
+        shortChunksBuffer = []; 
 
         sendCount++;
         let currentIndex = sendCount;
-        let sendType = isFinalAction ? "final" : "memo";
+        let sendType = isFinal ? "final" : "memo";
 
-        // 蓄積した30秒チャンク群を1つの3分間Blobに結合
-        const blob3min = new Blob(shortChunksBuffer, { type: 'audio/webm' });
-        shortChunksBuffer = []; // 送信キューに入れたら即座に配列を空にしてメモリ解放
+        log(`Part ${currentIndex} (${sendType}) の結合・デコード開始...`);
 
+        const blob3min = new Blob(chunksToProcess, { type: 'audio/webm' });
         const arrayBuffer = await blob3min.arrayBuffer();
 
         const tempAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -328,16 +330,16 @@
         startBtn.innerText = "● 録音開始";
         
         if (rec && rec.state !== "inactive") {
-            rec.stop(); // 最後のデータ吐き出しをキック
+            rec.stop();
         }
         if (currentStream) {
             currentStream.getTracks().forEach(track => track.stop());
         }
 
-        // 残っているバッファがあれば最終送信を実行
+        // 停止ボタンが押された時点で残っているチャンクがあれば最終送信（final）を実行
         setTimeout(async () => {
             if (shortChunksBuffer.length > 0) {
-                await processAndSendBuffer();
+                await processAndSendBuffer(true);
             }
         }, 500);
 
