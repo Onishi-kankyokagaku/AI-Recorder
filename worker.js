@@ -164,7 +164,7 @@ function encodeMP3(samples, sampleRate) {
     return result.buffer;
 }
 
-// ★最適化：32KBずつのチャンク変換により文字列連結時のメモリ急増を抑える
+// チャンク変換によるBase64処理
 function arrayBufferToBase64(buffer) {
     let binary = '';
     const bytes = new Uint8Array(buffer);
