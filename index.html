@@ -48,7 +48,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.18</span>
+        <span id="version-tag">Ver. 1.1.19</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -80,6 +80,11 @@
     let sendQueue = [];
     let isSending = false;
 
+    // --- 30秒リセット＆3分バッファ管理 ---
+    let shortChunksBuffer = []; // 30秒ごとのBlobを一時保管する配列
+    let currentStream = null;
+    // ------------------------------------
+
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
     const stopBtn = document.getElementById('stop');
@@ -94,51 +99,6 @@
         logMessages.push(`[Log] ${msg}`);
         if (logMessages.length > 10) logMessages.shift();
     }
-
-    // --- IndexedDB リアルタイムストリーミング領域 ---
-    const RAW_DB_NAME = 'AIRecorderRawDB';
-    const RAW_STORE_NAME = 'rawChunks';
-
-    function openRawDB() {
-        return new Promise((resolve, reject) => {
-            const req = indexedDB.open(RAW_DB_NAME, 1);
-            req.onupgradeneeded = (e) => {
-                const db = e.target.result;
-                if (!db.objectStoreNames.contains(RAW_STORE_NAME)) {
-                    db.createObjectStore(RAW_STORE_NAME, { autoIncrement: true });
-                }
-            };
-            req.onsuccess = () => resolve(req.result);
-            req.onerror = () => reject(req.error);
-        });
-    }
-
-    async function appendRawChunk(blob) {
-        try {
-            const db = await openRawDB();
-            const tx = db.transaction(RAW_STORE_NAME, 'readwrite');
-            tx.objectStore(RAW_STORE_NAME).add(blob);
-        } catch (err) {
-            log("生データストリーミング保存失敗: " + err.message);
-        }
-    }
-
-    async function popAllRawChunks() {
-        const db = await openRawDB();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(RAW_STORE_NAME, 'readwrite');
-            const store = tx.objectStore(RAW_STORE_NAME);
-            const getAllReq = store.getAll();
-
-            getAllReq.onsuccess = () => {
-                const blobs = getAllReq.result || [];
-                store.clear(); // 読み出し後、ディスク領域を即座に削除・解放
-                resolve(blobs);
-            };
-            getAllReq.onerror = () => reject(getAllReq.error);
-        });
-    }
-    // ------------------------------------------------
 
     const requestWakeLock = async () => {
         try {
@@ -168,7 +128,7 @@
         clearInterval(timer);
         if (rec && rec.state !== "inactive") {
             rec.stop();
-            rec.stream.getTracks().forEach(track => track.stop());
+            if (rec.stream) rec.stream.getTracks().forEach(track => track.stop());
         }
         if (silentAudio) { silentAudio.pause(); silentAudio.currentTime = 0; }
         startBtn.classList.remove('recording-active');
@@ -267,7 +227,6 @@
     };
 
     window.onload = () => {
-        // ★最適化：V8に過度な負荷を与える巨大ArrayBufferダミー確保を削除
         if (recoverBtn) {
             recoverBtn.style.display = 'none';
         }
@@ -275,54 +234,66 @@
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    const startSegment = async (stream) => {
+    // ★核心機能：30秒ごとにMediaRecorderをstop()してインスタンスを破棄・再生成
+    const startSegment = (stream) => {
+        let currentChunk = [];
         rec = new MediaRecorder(stream);
-        
-        // ★核心改修：1秒ごとに届くチャンクをメモリ上の配列に一切溜め込まず、即座にIndexedDB（ディスク）へ逃がす
-        rec.ondataavailable = (e) => { 
-            if (e.data.size > 0) {
-                appendRawChunk(e.data); 
+
+        rec.ondataavailable = (e) => {
+            if (e.data.size > 0) currentChunk.push(e.data);
+        };
+
+        rec.onstop = async () => {
+            if (currentChunk.length > 0) {
+                // 30秒分の小ファイルをBlobにして配列に保管
+                const 30sBlob = new Blob(currentChunk, { type: 'audio/webm' });
+                shortChunksBuffer.push(30sBlob);
+                currentChunk = [];
+            }
+
+            // 録音継続中であれば、新しいMediaRecorderインスタンスで次の30秒を開始
+            if (!isFinalAction) {
+                setTimeout(() => startSegment(stream), 0);
+            }
+
+            // 30秒×6個（＝3分間）溜まった、または「停止・議事録作成」が押された場合に結合して送信
+            if (shortChunksBuffer.length >= 6 || isFinalAction) {
+                if (shortChunksBuffer.length === 0) return;
+
+                sendCount++;
+                let currentIndex = sendCount;
+                let sendType = isFinalAction ? "final" : "memo";
+
+                // 30秒のWebMデータを6個連結して「3分間の1つのデータ」を作成
+                const 3minBlob = new Blob(shortChunksBuffer, { type: 'audio/webm' });
+                shortChunksBuffer = []; // バッファを即座に空にしてメモリ解放
+
+                const arrayBuffer = await 3minBlob.arrayBuffer();
+
+                // 使い捨てのAudioContextでデコードし、完了後に速やかにclose
+                const tempAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                tempAudioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+                    const channelData = buffer.getChannelData(0);
+                    const floatArray = new Float32Array(channelData);
+
+                    sendQueue.push({
+                        floatArray: floatArray,
+                        sampleRate: buffer.sampleRate,
+                        type: sendType,
+                        index: currentIndex
+                    });
+
+                    tempAudioCtx.close();
+                    processNextQueue();
+                }, (err) => {
+                    log("デコードエラー: " + err.message);
+                    tempAudioCtx.close();
+                });
             }
         };
-        
-        rec.onstop = async () => {
-            // ディスク（IndexedDB）から1秒ごとに蓄積したWebMチャンクを一括取得し、DB内を即座に空にする
-            const rawBlobs = await popAllRawChunks();
-            if (rawBlobs.length === 0) return;
 
-            sendCount++; 
-            let currentIndex = sendCount; 
-            let sendType = isFinalAction ? "final" : "memo"; 
-
-            const blob = new Blob(rawBlobs, { type: 'audio/webm' });
-            const arrayBuffer = await blob.arrayBuffer();
-            
-            if (!isFinalAction) setTimeout(() => startSegment(stream), 0);
-
-            // ★デコード用AudioContextを単発で使い捨て、完了後に明示的にcloseしてメモリ解放
-            const tempAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
-            tempAudioCtx.decodeAudioData(arrayBuffer, (buffer) => {
-                const channelData = buffer.getChannelData(0);
-                const floatArray = new Float32Array(channelData); 
-                
-                sendQueue.push({
-                    floatArray: floatArray,
-                    sampleRate: buffer.sampleRate,
-                    type: sendType,
-                    index: currentIndex
-                });
-
-                tempAudioCtx.close(); // 明示的に解放
-                processNextQueue();
-            }, (err) => {
-                log("デコードエラー: " + err.message);
-                tempAudioCtx.close();
-            });
-        }; 
-
-        rec.start(1000); // 1秒ごとにondataavailableを発生させる
-    }; 
+        rec.start();
+    };
 
     startBtn.onclick = async () => {
         startBtn.classList.add('recording-active');
@@ -340,7 +311,9 @@
             sendCount = 0; 
             sendQueue = [];
             isSending = false;
-            const stream = await navigator.mediaDevices.getUserMedia({ 
+            shortChunksBuffer = [];
+
+            currentStream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
                     sampleRate: 16000,      // サンプルレートを 16kHz に抑える
                     channelCount: 1,        // モノラル（1ch）に指定
@@ -349,11 +322,12 @@
                 }
             });
             silentAudio.play();
-            startSegment(stream);
+            startSegment(currentStream);
 
+            // ★30秒間隔で rec.stop() を自動実行（ブラウザ内部バッファの完全解放）
             timer = setInterval(() => {
                 if (rec && rec.state === "recording") rec.stop();
-            }, 180000); 
+            }, 30000); 
 
             startBtn.disabled = true;
             stopBtn.disabled = false;
@@ -370,7 +344,9 @@
         clearInterval(timer);
         if (rec && rec.state !== "inactive") {
             rec.stop();
-            rec.stream.getTracks().forEach(track => track.stop());
+        }
+        if (currentStream) {
+            currentStream.getTracks().forEach(track => track.stop());
         }
         status.innerHTML = "最終データを解析中...";
         stopBtn.disabled = true;
@@ -431,18 +407,23 @@
                     URL.revokeObjectURL(url);
                 });
 
-                const clearTx = db.transaction('audioQueue', 'readwrite');
-                const clearStore = clearTx.objectStore('audioQueue');
-                const clearReq = clearStore.clear();
+                // ダウンロードダイアログでのキャンセル事故を防ぐため確認アラートを挟む
+                setTimeout(() => {
+                    const isConfirmed = confirm(`${items.length} 件のファイルを保存用にダウンロードしました。\n\n端末内に残っている未送信データを削除してもよろしいですか？\n（キャンセルを押すとデータを残したままにします）`);
 
-                clearReq.onsuccess = () => {
-                    alert(`${items.length} 件の音声ファイルをダウンロードし、端末内の一次保存データを削除しました。`);
-                    recoverBtn.style.display = 'none';
-                };
+                    if (isConfirmed) {
+                        const clearTx = db.transaction('audioQueue', 'readwrite');
+                        const clearStore = clearTx.objectStore('audioQueue');
+                        const clearReq = clearStore.clear();
 
-                clearReq.onerror = () => {
-                    alert(`${items.length} 件の音声ファイルをダウンロードしました。（ローカルデータの削除に失敗しました）`);
-                };
+                        clearReq.onsuccess = () => {
+                            alert("端末内の未送信データを削除しました。");
+                            recoverBtn.style.display = 'none';
+                        };
+                    } else {
+                        alert("データは削除されずに端末内に保持されています。");
+                    }
+                }, 500);
             };
         };
     };
