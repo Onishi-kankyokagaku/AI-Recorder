@@ -44,11 +44,29 @@
 
     .qr-container { margin: 20px auto; padding: 15px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); display: inline-block; text-align: center; }
     .qr-container svg { display: block; margin: 0 auto; width: 200px; height: 200px; }
+
+    /* デバッグログ表示用スタイル */
+    #debug-log {
+        margin-top: 20px;
+        background: #222;
+        color: #00ff66;
+        font-family: monospace;
+        font-size: 0.75rem;
+        text-align: left;
+        padding: 10px;
+        border-radius: 8px;
+        height: 180px;
+        overflow-y: auto;
+        word-break: break-all;
+        max-width: 400px;
+        margin-left: auto;
+        margin-right: auto;
+    }
 </style>
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.22</span>
+        <span id="version-tag">Ver. 1.1.23</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -59,6 +77,9 @@
     <button id="start">● 録音開始</button>
     <button id="stop" disabled>■ 停止・議事録作成</button>
     <p id="status">システム初期化中（スプレッドシート作成中）...</p>
+
+    <!-- 画面用リアルタイムログエリア -->
+    <div id="debug-log">--- 動作ログモニター ---</div>
 
     <audio id="silent-audio" loop>
         <source src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=" type="audio/wav">
@@ -87,14 +108,17 @@
     const stopBtn = document.getElementById('stop');
     const silentAudio = document.getElementById('silent-audio');
     const recoverBtn = document.getElementById('recover-btn');
+    const debugLog = document.getElementById('debug-log');
 
     startBtn.disabled = true;
 
-    let logMessages = [];
+    // 画面上のログ出力関数
     function log(msg) {
         console.log(msg);
-        logMessages.push(`[Log] ${msg}`);
-        if (logMessages.length > 10) logMessages.shift();
+        const now = new Date();
+        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+        debugLog.innerHTML += `<br>[${timeStr}] ${msg}`;
+        debugLog.scrollTop = debugLog.scrollHeight; // 自動最下部スクロール
     }
 
     const requestWakeLock = async () => {
@@ -139,7 +163,10 @@
     }
 
     function processNextQueue() {
-        if (isSending || sendQueue.length === 0) return;
+        if (isSending || sendQueue.length === 0) {
+            log(`キュー確認: isSending=${isSending}, 残数=${sendQueue.length}`);
+            return;
+        }
 
         isSending = true;
         const task = sendQueue.shift();
@@ -230,7 +257,6 @@
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    // ★修正：3分（6個）ごとに送信後も自動継続してパート2、パート3を処理するロジック
     const startRecordingSession = (stream) => {
         rec = new MediaRecorder(stream);
 
@@ -239,22 +265,23 @@
                 shortChunksBuffer.push(e.data);
                 log(`30秒チャンク取得 (${shortChunksBuffer.length}/6個)`);
 
-                // 6個（3分）に達したら送信関数を実行
                 if (shortChunksBuffer.length >= 6) {
+                    log("3分（6個）に達したため結合・送信を開始します");
                     await processAndSendBuffer(false);
                 }
             }
         };
 
-        // 30秒ごとにデータを受け取る
         rec.start(30000);
+        log("MediaRecorder起動: 30秒ごとにデータを受け取ります");
     };
 
-    // バッファの結合・デコード・送信処理
     const processAndSendBuffer = async (isFinal) => {
-        if (shortChunksBuffer.length === 0) return;
+        if (shortChunksBuffer.length === 0) {
+            log("送信対象のバッファが空のためスキップします");
+            return;
+        }
 
-        // 送信対象の30秒チャンク群をコピーしてバッファを即時クリア
         const chunksToProcess = [...shortChunksBuffer];
         shortChunksBuffer = []; 
 
@@ -262,13 +289,16 @@
         let currentIndex = sendCount;
         let sendType = isFinal ? "final" : "memo";
 
-        log(`Part ${currentIndex} (${sendType}) の結合・デコード開始...`);
+        log(`Part ${currentIndex} (${sendType}) 結合処理開始... (${chunksToProcess.length}個のBlob)`);
 
         const blob3min = new Blob(chunksToProcess, { type: 'audio/webm' });
         const arrayBuffer = await blob3min.arrayBuffer();
 
         const tempAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        log("AudioContextデコード中...");
+        
         tempAudioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+            log(`デコード完了: 長さ ${buffer.duration.toFixed(1)} 秒`);
             const channelData = buffer.getChannelData(0);
             const floatArray = new Float32Array(channelData);
 
@@ -329,6 +359,8 @@
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音開始";
         
+        log("停止ボタンが押されました");
+
         if (rec && rec.state !== "inactive") {
             rec.stop();
         }
@@ -336,9 +368,9 @@
             currentStream.getTracks().forEach(track => track.stop());
         }
 
-        // 停止ボタンが押された時点で残っているチャンクがあれば最終送信（final）を実行
         setTimeout(async () => {
             if (shortChunksBuffer.length > 0) {
+                log(`残りのバッファ (${shortChunksBuffer.length}個) を最終送信します`);
                 await processAndSendBuffer(true);
             }
         }, 500);
