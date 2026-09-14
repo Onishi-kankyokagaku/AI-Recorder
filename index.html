@@ -48,7 +48,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.20</span>
+        <span id="version-tag">Ver. 1.1.21</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -122,7 +122,6 @@
             <hr style="border: 0; border-top: 1px solid #d32f2f; margin: 15px 0;">
             <span style="font-size:0.75rem; color:#777;">[エラー詳細]: ${errorMsg}</span>
         `;
-        clearInterval(timer);
         if (rec && rec.state !== "inactive") {
             rec.stop();
             if (rec.stream) rec.stream.getTracks().forEach(track => track.stop());
@@ -231,61 +230,59 @@
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    const startSegment = (stream) => {
-        let currentChunk = [];
+    // ★改善：30秒ごとの小刻み吐き出しと正確な3分間結合ロジック
+    const startRecordingSession = (stream) => {
         rec = new MediaRecorder(stream);
 
-        rec.ondataavailable = (e) => {
-            if (e.data.size > 0) currentChunk.push(e.data);
-        };
+        // 30秒ごとにブラウザから小分けのWebM Blobが渡される
+        rec.ondataavailable = async (e) => {
+            if (e.data.size > 0) {
+                shortChunksBuffer.push(e.data);
+                log(`30秒チャンク取得 (${shortChunksBuffer.length}/6個)`);
 
-        rec.onstop = async () => {
-            if (currentChunk.length > 0) {
-                // 【修正】変数名を 30sBlob から blob30s に変更
-                const blob30s = new Blob(currentChunk, { type: 'audio/webm' });
-                shortChunksBuffer.push(blob30s);
-                currentChunk = [];
-            }
-
-            if (!isFinalAction) {
-                setTimeout(() => startSegment(stream), 0);
-            }
-
-            if (shortChunksBuffer.length >= 6 || isFinalAction) {
-                if (shortChunksBuffer.length === 0) return;
-
-                sendCount++;
-                let currentIndex = sendCount;
-                let sendType = isFinalAction ? "final" : "memo";
-
-                // 【修正】変数名を 3minBlob から blob3min に変更
-                const blob3min = new Blob(shortChunksBuffer, { type: 'audio/webm' });
-                shortChunksBuffer = []; 
-
-                const arrayBuffer = await blob3min.arrayBuffer();
-
-                const tempAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                tempAudioCtx.decodeAudioData(arrayBuffer, (buffer) => {
-                    const channelData = buffer.getChannelData(0);
-                    const floatArray = new Float32Array(channelData);
-
-                    sendQueue.push({
-                        floatArray: floatArray,
-                        sampleRate: buffer.sampleRate,
-                        type: sendType,
-                        index: currentIndex
-                    });
-
-                    tempAudioCtx.close();
-                    processNextQueue();
-                }, (err) => {
-                    log("デコードエラー: " + err.message);
-                    tempAudioCtx.close();
-                });
+                // 6個（＝180秒＝3分）溜まった、または「停止」ボタンが押された場合に結合処理
+                if (shortChunksBuffer.length >= 6 || isFinalAction) {
+                    await processAndSendBuffer();
+                }
             }
         };
 
-        rec.start();
+        // 30秒ごとにondataavailableを発生させる
+        rec.start(30000);
+    };
+
+    // 3分データ（または停止時のデータ）を一つに結合してWorkerへ送る関数
+    const processAndSendBuffer = async () => {
+        if (shortChunksBuffer.length === 0) return;
+
+        sendCount++;
+        let currentIndex = sendCount;
+        let sendType = isFinalAction ? "final" : "memo";
+
+        // 蓄積した30秒チャンク群を1つの3分間Blobに結合
+        const blob3min = new Blob(shortChunksBuffer, { type: 'audio/webm' });
+        shortChunksBuffer = []; // 送信キューに入れたら即座に配列を空にしてメモリ解放
+
+        const arrayBuffer = await blob3min.arrayBuffer();
+
+        const tempAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        tempAudioCtx.decodeAudioData(arrayBuffer, (buffer) => {
+            const channelData = buffer.getChannelData(0);
+            const floatArray = new Float32Array(channelData);
+
+            sendQueue.push({
+                floatArray: floatArray,
+                sampleRate: buffer.sampleRate,
+                type: sendType,
+                index: currentIndex
+            });
+
+            tempAudioCtx.close();
+            processNextQueue();
+        }, (err) => {
+            log("デコードエラー: " + err.message);
+            tempAudioCtx.close();
+        });
     };
 
     startBtn.onclick = async () => {
@@ -315,11 +312,7 @@
                 }
             });
             silentAudio.play();
-            startSegment(currentStream);
-
-            timer = setInterval(() => {
-                if (rec && rec.state === "recording") rec.stop();
-            }, 30000); 
+            startRecordingSession(currentStream);
 
             startBtn.disabled = true;
             stopBtn.disabled = false;
@@ -333,13 +326,21 @@
         isFinalAction = true;
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音開始";
-        clearInterval(timer);
+        
         if (rec && rec.state !== "inactive") {
-            rec.stop();
+            rec.stop(); // 最後のデータ吐き出しをキック
         }
         if (currentStream) {
             currentStream.getTracks().forEach(track => track.stop());
         }
+
+        // 残っているバッファがあれば最終送信を実行
+        setTimeout(async () => {
+            if (shortChunksBuffer.length > 0) {
+                await processAndSendBuffer();
+            }
+        }, 500);
+
         status.innerHTML = "最終データを解析中...";
         stopBtn.disabled = true;
     };
