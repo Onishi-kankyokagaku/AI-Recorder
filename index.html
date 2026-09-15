@@ -5,7 +5,6 @@
     <meta charset="UTF-8">
     <title>AI議事録レコーダー</title>
 <style>
-    /* 録音中のボタン：深みのある光と鼓動 */
     .recording-active {
         background: linear-gradient(135.2deg, #4CAF50 1.2%, #81C784 98.8%) !important;
         position: relative;
@@ -65,7 +64,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.4.1 (AudioWorklet + OPFS Lock-Free)</span>
+        <span id="version-tag">Ver. 1.4.2 (Log Fixed)</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -103,7 +102,6 @@
     let sendQueue = [];
     let isSending = false;
 
-    // --- OPFS & 排他制御設定 ---
     const TARGET_SAMPLE_RATE = 16000;
     const THREE_MIN_SAMPLES = TARGET_SAMPLE_RATE * 180; // 3分間＝288万サンプル
     
@@ -111,11 +109,11 @@
     let opfsFileHandle = null;
     let opfsWritable = null;
     let samplesWrittenInChunk = 0;
-    let isFlushing = false; // 連打防止フラグ
+    let isFlushing = false;
 
-    // 一時書き込みキュー
     let writeQueue = [];
     let isWriting = false;
+    let lastLoggedSecMark = -1; // ログ重複防止フラグ
 
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
@@ -293,9 +291,9 @@
         opfsFileHandle = await opfsRoot.getFileHandle(`recording_chunk_${Date.now()}.bin`, { create: true });
         opfsWritable = await opfsFileHandle.createWritable();
         samplesWrittenInChunk = 0;
+        lastLoggedSecMark = -1;
     }
 
-    // 非同期での書き込みキュー処理（メインスレッドのブロッキングを完全防止）
     async function processWriteQueue() {
         if (isWriting || writeQueue.length === 0 || !opfsWritable) return;
         isWriting = true;
@@ -305,13 +303,16 @@
             await opfsWritable.write(chunk.buffer);
             samplesWrittenInChunk += chunk.length;
 
-            // 定期的な進捗ログ表示（約10秒ごと）
-            if (samplesWrittenInChunk % (TARGET_SAMPLE_RATE * 10) < 512) {
-                const sec = (samplesWrittenInChunk / TARGET_SAMPLE_RATE).toFixed(0);
-                log(`録音継続中: ${sec}秒経過 / 180秒`);
+            // 経過秒数（切り捨て）を算出
+            const currentSec = Math.floor(samplesWrittenInChunk / TARGET_SAMPLE_RATE);
+
+            // 10秒の倍数に達した「最初の一回のみ」ログ出力する
+            if (currentSec > 0 && currentSec % 10 === 0 && currentSec !== lastLoggedSecMark) {
+                lastLoggedSecMark = currentSec;
+                log(`録音継続中: ${currentSec}秒経過 / 180秒`);
             }
 
-            // 3分到達判定（重複発火防止）
+            // 3分（180秒＝288万サンプル）到達判定
             if (samplesWrittenInChunk >= THREE_MIN_SAMPLES && !isFlushing) {
                 isFlushing = true;
                 log("3分到達: OPFSから送信処理を開始します");
@@ -398,6 +399,7 @@
             
             await initOpfsSegment();
 
+            // 音声周波数はマイクネイティブ（48kHz等）で安定稼働
             audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             const nativeSampleRate = audioCtx.sampleRate;
             log(`マイク認識サンプルレート: ${nativeSampleRate} Hz`);
@@ -417,17 +419,14 @@
             audioSource = audioCtx.createMediaStreamSource(mediaStream);
             workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor');
 
-            const ratio = nativeSampleRate / TARGET_SAMPLE_RATE;
+            // 正しいリサンプリング比率計算
+            const step = nativeSampleRate / TARGET_SAMPLE_RATE;
 
-            // 同期でキューに追加し、非同期ループで順番にディスクへ書き出し
             workletNode.port.onmessage = (e) => {
                 const inputData = e.data;
                 const downsampled = [];
-                for (let i = 0; i < inputData.length; i += ratio) {
-                    const idx = Math.floor(i);
-                    if (idx < inputData.length) {
-                        downsampled.push(inputData[idx]);
-                    }
+                for (let i = 0; i < inputData.length; i += step) {
+                    downsampled.push(inputData[Math.floor(i)]);
                 }
 
                 if (downsampled.length > 0) {
@@ -463,7 +462,6 @@
 
         cleanupAudio();
 
-        // ディスクへの書き込み残分が完了するのを少し待ってから最終送信
         setTimeout(async () => {
             if (samplesWrittenInChunk > 0) {
                 await flushOpfsBuffer(true);
