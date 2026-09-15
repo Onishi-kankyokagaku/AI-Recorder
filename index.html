@@ -65,7 +65,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.4.0 (AudioWorklet + OPFS)</span>
+        <span id="version-tag">Ver. 1.4.1 (AudioWorklet + OPFS Lock-Free)</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -103,7 +103,7 @@
     let sendQueue = [];
     let isSending = false;
 
-    // --- OPFS & 定数設定 ---
+    // --- OPFS & 排他制御設定 ---
     const TARGET_SAMPLE_RATE = 16000;
     const THREE_MIN_SAMPLES = TARGET_SAMPLE_RATE * 180; // 3分間＝288万サンプル
     
@@ -111,6 +111,11 @@
     let opfsFileHandle = null;
     let opfsWritable = null;
     let samplesWrittenInChunk = 0;
+    let isFlushing = false; // 連打防止フラグ
+
+    // 一時書き込みキュー
+    let writeQueue = [];
+    let isWriting = false;
 
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
@@ -257,7 +262,7 @@
         }
         try {
             opfsRoot = await navigator.storage.getDirectory();
-            log("OPFS (ストレージ) の初期化成功");
+            log("OPFS (ストレージ) 初期化成功");
         } catch (e) {
             log("OPFS非対応エラー: " + e.message);
         }
@@ -265,7 +270,6 @@
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    // --- AudioWorklet コード ---
     const workletCode = `
         class PCMProcessor extends AudioWorkletProcessor {
             process(inputs, outputs, parameters) {
@@ -282,7 +286,6 @@
         registerProcessor('pcm-processor', PCMProcessor);
     `;
 
-    // 新しい OPFS セグメントファイルを作成
     async function initOpfsSegment() {
         if (opfsWritable) {
             try { await opfsWritable.close(); } catch(e){}
@@ -292,7 +295,39 @@
         samplesWrittenInChunk = 0;
     }
 
-    // OPFS ファイルからデータを読み出して Worker に回し、ストレージを削除
+    // 非同期での書き込みキュー処理（メインスレッドのブロッキングを完全防止）
+    async function processWriteQueue() {
+        if (isWriting || writeQueue.length === 0 || !opfsWritable) return;
+        isWriting = true;
+
+        const chunk = writeQueue.shift();
+        try {
+            await opfsWritable.write(chunk.buffer);
+            samplesWrittenInChunk += chunk.length;
+
+            // 定期的な進捗ログ表示（約10秒ごと）
+            if (samplesWrittenInChunk % (TARGET_SAMPLE_RATE * 10) < 512) {
+                const sec = (samplesWrittenInChunk / TARGET_SAMPLE_RATE).toFixed(0);
+                log(`録音継続中: ${sec}秒経過 / 180秒`);
+            }
+
+            // 3分到達判定（重複発火防止）
+            if (samplesWrittenInChunk >= THREE_MIN_SAMPLES && !isFlushing) {
+                isFlushing = true;
+                log("3分到達: OPFSから送信処理を開始します");
+                await flushOpfsBuffer(false);
+                isFlushing = false;
+            }
+        } catch (err) {
+            console.error("OPFS書き込みエラー:", err);
+        } finally {
+            isWriting = false;
+            if (writeQueue.length > 0) {
+                setTimeout(processWriteQueue, 0);
+            }
+        }
+    }
+
     async function flushOpfsBuffer(isFinal) {
         if (!opfsWritable || samplesWrittenInChunk === 0) return;
 
@@ -303,7 +338,6 @@
         const currentHandle = opfsFileHandle;
         const currentWritable = opfsWritable;
 
-        // 次のチャンク用に新しい OPFS ファイルを先に準備
         if (!isFinal) {
             await initOpfsSegment();
         } else {
@@ -311,15 +345,13 @@
             opfsFileHandle = null;
         }
 
-        // 現在のストリームを確定・クローズしてリードオンリーのファイルオブジェクトを取得
         await currentWritable.close();
         const file = await currentHandle.getFile();
         const arrayBuffer = await file.arrayBuffer();
 
-        // Binaryデータを Float32Array に復元
         const floatArray = new Float32Array(arrayBuffer);
 
-        log(`Part ${currentIndex} (${sendType}) OPFSから読み出し完了 (${(floatArray.length / TARGET_SAMPLE_RATE).toFixed(1)}秒分)`);
+        log(`Part ${currentIndex} (${sendType}) OPFS読み出し完了 (${(floatArray.length / TARGET_SAMPLE_RATE).toFixed(1)}秒分)`);
 
         sendQueue.push({
             floatArray: floatArray,
@@ -328,11 +360,10 @@
             index: currentIndex
         });
 
-        // 読み出し完了した一時ファイルは即座にOPFSから物理削除して容量圧迫を防止
         try {
             await opfsRoot.removeEntry(currentHandle.name);
         } catch (e) {
-            console.warn("OPFSファイル一時削除エラー:", e);
+            console.warn("OPFSファイル削除失敗:", e);
         }
 
         processNextQueue();
@@ -361,6 +392,9 @@
             sendCount = 0; 
             sendQueue = [];
             isSending = false;
+            writeQueue = [];
+            isWriting = false;
+            isFlushing = false;
             
             await initOpfsSegment();
 
@@ -385,11 +419,9 @@
 
             const ratio = nativeSampleRate / TARGET_SAMPLE_RATE;
 
-            // ★核心処理：届いたPCM波形を即座に OPFS ストリーム（ディスク）へ流し込みメモリを即破棄
-            workletNode.port.onmessage = async (e) => {
+            // 同期でキューに追加し、非同期ループで順番にディスクへ書き出し
+            workletNode.port.onmessage = (e) => {
                 const inputData = e.data;
-                
-                // 16kHzダウンサンプリング用の一時バッファ（128サンプル単位の超微小サイズ）
                 const downsampled = [];
                 for (let i = 0; i < inputData.length; i += ratio) {
                     const idx = Math.floor(i);
@@ -398,17 +430,9 @@
                     }
                 }
 
-                if (downsampled.length > 0 && opfsWritable) {
-                    const f32Chunk = new Float32Array(downsampled);
-                    // メモリに溜めず、ディスクへストリーミング直書き
-                    await opfsWritable.write(f32Chunk.buffer);
-                    samplesWrittenInChunk += f32Chunk.length;
-                }
-
-                // 3分間（288万サンプル）ストレージに書き込んだら送信キューへ送出
-                if (samplesWrittenInChunk >= THREE_MIN_SAMPLES) {
-                    log("3分到達: OPFSから送信処理を開始します");
-                    await flushOpfsBuffer(false);
+                if (downsampled.length > 0) {
+                    writeQueue.push(new Float32Array(downsampled));
+                    processWriteQueue();
                 }
             };
 
@@ -439,9 +463,12 @@
 
         cleanupAudio();
 
-        if (samplesWrittenInChunk > 0) {
-            await flushOpfsBuffer(true);
-        }
+        // ディスクへの書き込み残分が完了するのを少し待ってから最終送信
+        setTimeout(async () => {
+            if (samplesWrittenInChunk > 0) {
+                await flushOpfsBuffer(true);
+            }
+        }, 300);
 
         status.innerHTML = "最終データを解析中...";
         stopBtn.disabled = true;
