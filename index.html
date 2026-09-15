@@ -64,7 +64,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.4.4 (Thread-Safe Worklet)</span>
+        <span id="version-tag">Ver. 1.4.5 (Flush Sync Fixed)</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -268,7 +268,6 @@
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    // ★大改修：Workletスレッド側で 16kHz間引き ＋ 1秒（16,000サンプル）ごとのパッキングを実施
     const workletCode = `
         class PCMProcessor extends AudioWorkletProcessor {
             constructor(options) {
@@ -277,8 +276,6 @@
                 this.targetRate = 16000;
                 this.ratio = this.nativeRate / this.targetRate;
                 this.resamplePhase = 0;
-                
-                // 1秒分（16,000サンプル）の固定バッファ
                 this.buffer = new Float32Array(16000);
                 this.bufferIndex = 0;
             }
@@ -293,7 +290,6 @@
                             const idx = Math.floor(i);
                             this.buffer[this.bufferIndex++] = inputChannel[idx];
 
-                            // 1秒分溜まったらメインスレッドへ一括送信（転送権譲渡でコピーコストゼロ）
                             if (this.bufferIndex >= 16000) {
                                 this.port.postMessage(this.buffer);
                                 this.buffer = new Float32Array(16000);
@@ -311,9 +307,6 @@
     `;
 
     async function initOpfsSegment() {
-        if (opfsWritable) {
-            try { await opfsWritable.close(); } catch(e){}
-        }
         opfsFileHandle = await opfsRoot.getFileHandle(`recording_chunk_${Date.now()}.bin`, { create: true });
         opfsWritable = await opfsFileHandle.createWritable();
         samplesWrittenInChunk = 0;
@@ -336,11 +329,17 @@
                 log(`録音継続中: ${currentSec}秒経過 / 180秒`);
             }
 
+            // 3分（180秒＝288万サンプル）到達時の呼び出し
             if (samplesWrittenInChunk >= THREE_MIN_SAMPLES && !isFlushing) {
                 isFlushing = true;
                 log("3分到達: OPFSから送信処理を開始します");
-                await flushOpfsBuffer(false);
-                isFlushing = false;
+                // 非同期のフラッシュを背景で安全に実行
+                flushOpfsBuffer(false).then(() => {
+                    isFlushing = false;
+                }).catch(err => {
+                    log("送信フラッシュエラー: " + err.message);
+                    isFlushing = false;
+                });
             }
         } catch (err) {
             console.error("OPFS書き込みエラー:", err);
@@ -352,6 +351,7 @@
         }
     }
 
+    // 核心修正：デッドロックを回避する安全なフラッシュ処理
     async function flushOpfsBuffer(isFinal) {
         if (!opfsWritable || samplesWrittenInChunk === 0) return;
 
@@ -362,17 +362,20 @@
         const currentHandle = opfsFileHandle;
         const currentWritable = opfsWritable;
 
+        // 次のチャンク書き込み用に参照を切り替える
+        opfsWritable = null;
+        opfsFileHandle = null;
+
         if (!isFinal) {
             await initOpfsSegment();
-        } else {
-            opfsWritable = null;
-            opfsFileHandle = null;
         }
 
+        // 書き込みストリームを確実にクローズ
         await currentWritable.close();
+
+        // クローズ完了後、安全にファイルを取得して Float32Array に変換
         const file = await currentHandle.getFile();
         const arrayBuffer = await file.arrayBuffer();
-
         const floatArray = new Float32Array(arrayBuffer);
 
         log(`Part ${currentIndex} (${sendType}) OPFS読み出し完了 (${(floatArray.length / TARGET_SAMPLE_RATE).toFixed(1)}秒分)`);
@@ -384,6 +387,7 @@
             index: currentIndex
         });
 
+        // 読み出し完了した一時ファイルは即座に削除
         try {
             await opfsRoot.removeEntry(currentHandle.name);
         } catch (e) {
@@ -440,14 +444,12 @@
 
             audioSource = audioCtx.createMediaStreamSource(mediaStream);
             
-            // Worklet側へマイクの生周波数を渡してスレッド内でダウンサンプリング
             workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor', {
                 processorOptions: { nativeRate: nativeSampleRate }
             });
 
-            // 1秒間に1回だけ、1秒分にまとめられた16kHz波形を受け取りOPFSキューへ
             workletNode.port.onmessage = (e) => {
-                const oneSecBuffer = e.data; // Float32Array (16,000サンプル)
+                const oneSecBuffer = e.data;
                 writeQueue.push(oneSecBuffer);
                 processWriteQueue();
             };
@@ -479,11 +481,17 @@
 
         cleanupAudio();
 
-        setTimeout(async () => {
+        // 書き込みキューが完全に空になるのを待ってから最終フラッシュ
+        const checkAndFlush = async () => {
+            if (isWriting || writeQueue.length > 0) {
+                setTimeout(checkAndFlush, 100);
+                return;
+            }
             if (samplesWrittenInChunk > 0) {
                 await flushOpfsBuffer(true);
             }
-        }, 500);
+        };
+        await checkAndFlush();
 
         status.innerHTML = "最終データを解析中...";
         stopBtn.disabled = true;
