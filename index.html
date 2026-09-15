@@ -64,7 +64,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.4.5 (Flush Sync Fixed)</span>
+        <span id="version-tag">Ver. 1.5.0 (Stream Baton-Pass)</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -89,10 +89,11 @@
     let currentSsUrl = null; 
     let currentLogRow = null; 
     
-    let audioCtx = null;
-    let audioSource = null;
-    let workletNode = null;
-    let mediaStream = null;
+    // 現在アクティブなオーディオノード
+    let activeAudioCtx = null;
+    let activeMediaStream = null;
+    let activeWorkletNode = null;
+    let activeAudioSource = null;
 
     let isFinalAction = false;
     let worker = null;
@@ -157,7 +158,7 @@
             <hr style="border: 0; border-top: 1px solid #d32f2f; margin: 15px 0;">
             <span style="font-size:0.75rem; color:#777;">[エラー詳細]: ${errorMsg}</span>
         `;
-        cleanupAudio();
+        cleanupAudioSession(activeAudioCtx, activeMediaStream, activeWorkletNode, activeAudioSource);
         if (silentAudio) { silentAudio.pause(); silentAudio.currentTime = 0; }
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音停止（エラー検出）";
@@ -240,7 +241,7 @@
 
                 silentAudio.pause();
                 silentAudio.currentTime = 0;
-                cleanupAudio();
+                cleanupAudioSession(activeAudioCtx, activeMediaStream, activeWorkletNode, activeAudioSource);
                 if (wakeLock !== null) { wakeLock.release().then(() => { wakeLock = null; }); }                
                 window.onbeforeunload = null;
             } else if (data.type === 'memo') {
@@ -329,15 +330,18 @@
                 log(`録音継続中: ${currentSec}秒経過 / 180秒`);
             }
 
-            // 3分（180秒＝288万サンプル）到達時の呼び出し
-            if (samplesWrittenInChunk >= THREE_MIN_SAMPLES && !isFlushing) {
+            // 3分到達時のバトンタッチトリガー
+            if (samplesWrittenInChunk >= THREE_MIN_SAMPLES && !isFlushing && !isFinalAction) {
                 isFlushing = true;
-                log("3分到達: OPFSから送信処理を開始します");
-                // 非同期のフラッシュを背景で安全に実行
-                flushOpfsBuffer(false).then(() => {
+                log("3分到達: マイクバトンタッチ＆送信処理を開始");
+                
+                // 次のストリームへの移行と旧ストリーム破棄（C++メモリ完全解放）
+                performStreamBatonPass().then(() => {
+                    return flushOpfsBuffer(false);
+                }).then(() => {
                     isFlushing = false;
                 }).catch(err => {
-                    log("送信フラッシュエラー: " + err.message);
+                    log("バトンタッチ失敗: " + err.message);
                     isFlushing = false;
                 });
             }
@@ -351,7 +355,66 @@
         }
     }
 
-    // 核心修正：デッドロックを回避する安全なフラッシュ処理
+    // ★核心機能：ストリームのバトンタッチ（新マイク起動 ➔ 旧マイク停止・C++メモリ完全解放）
+    async function performStreamBatonPass() {
+        log("🔄 [バトンタッチ] 新マイクストリームの初期化中...");
+        
+        // 1. 旧セッションの退避
+        const oldCtx = activeAudioCtx;
+        const oldStream = activeMediaStream;
+        const oldWorklet = activeWorkletNode;
+        const oldSource = activeAudioSource;
+
+        // 2. 新セッションの起動（旧マイクを動かしたまま裏で準備）
+        const newCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const nativeSampleRate = newCtx.sampleRate;
+
+        const newStream = await navigator.mediaDevices.getUserMedia({ 
+            audio: { echoCancellation: true, noiseSuppression: true }
+        });
+
+        const blob = new Blob([workletCode], { type: 'application/javascript' });
+        const workletUrl = URL.createObjectURL(blob);
+        await newCtx.audioWorklet.addModule(workletUrl);
+        URL.revokeObjectURL(workletUrl);
+
+        const newSource = newCtx.createMediaStreamSource(newStream);
+        const newWorklet = new AudioWorkletNode(newCtx, 'pcm-processor', {
+            processorOptions: { nativeRate: nativeSampleRate }
+        });
+
+        newWorklet.port.onmessage = (e) => {
+            if (!isFinalAction) {
+                writeQueue.push(e.data);
+                processWriteQueue();
+            }
+        };
+
+        newSource.connect(newWorklet);
+        const dummyGain = newCtx.createGain();
+        dummyGain.gain.value = 0;
+        newWorklet.connect(dummyGain);
+        dummyGain.connect(newCtx.destination);
+
+        // 3. アクティブ参照を新セッションへ切り替え（シームレス接続）
+        activeAudioCtx = newCtx;
+        activeMediaStream = newStream;
+        activeWorkletNode = newWorklet;
+        activeAudioSource = newSource;
+
+        log("✅ [バトンタッチ] 新マイク接続完了。旧マイク(C++バッファ)を完全破棄します");
+
+        // 4. 旧マイクストリームを物理停止（C++層メモリの即時OS全解放）
+        cleanupAudioSession(oldCtx, oldStream, oldWorklet, oldSource);
+    }
+
+    function cleanupAudioSession(ctx, stream, worklet, source) {
+        if (worklet) { worklet.disconnect(); }
+        if (source) { source.disconnect(); }
+        if (stream) { stream.getTracks().forEach(track => track.stop()); }
+        if (ctx) { ctx.close(); }
+    }
+
     async function flushOpfsBuffer(isFinal) {
         if (!opfsWritable || samplesWrittenInChunk === 0) return;
 
@@ -362,7 +425,6 @@
         const currentHandle = opfsFileHandle;
         const currentWritable = opfsWritable;
 
-        // 次のチャンク書き込み用に参照を切り替える
         opfsWritable = null;
         opfsFileHandle = null;
 
@@ -370,10 +432,8 @@
             await initOpfsSegment();
         }
 
-        // 書き込みストリームを確実にクローズ
         await currentWritable.close();
 
-        // クローズ完了後、安全にファイルを取得して Float32Array に変換
         const file = await currentHandle.getFile();
         const arrayBuffer = await file.arrayBuffer();
         const floatArray = new Float32Array(arrayBuffer);
@@ -387,7 +447,6 @@
             index: currentIndex
         });
 
-        // 読み出し完了した一時ファイルは即座に削除
         try {
             await opfsRoot.removeEntry(currentHandle.name);
         } catch (e) {
@@ -395,13 +454,6 @@
         }
 
         processNextQueue();
-    }
-
-    function cleanupAudio() {
-        if (workletNode) { workletNode.disconnect(); workletNode = null; }
-        if (audioSource) { audioSource.disconnect(); audioSource = null; }
-        if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); mediaStream = null; }
-        if (audioCtx) { audioCtx.close(); audioCtx = null; }
     }
 
     startBtn.onclick = async () => {
@@ -426,39 +478,37 @@
             
             await initOpfsSegment();
 
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            const nativeSampleRate = audioCtx.sampleRate;
+            activeAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const nativeSampleRate = activeAudioCtx.sampleRate;
             log(`マイク認識サンプルレート: ${nativeSampleRate} Hz`);
 
-            mediaStream = await navigator.mediaDevices.getUserMedia({ 
-                audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true
-                }
+            activeMediaStream = await navigator.mediaDevices.getUserMedia({ 
+                audio: { echoCancellation: true, noiseSuppression: true }
             });
 
             const blob = new Blob([workletCode], { type: 'application/javascript' });
             const workletUrl = URL.createObjectURL(blob);
-            await audioCtx.audioWorklet.addModule(workletUrl);
+            await activeAudioCtx.audioWorklet.addModule(workletUrl);
             URL.revokeObjectURL(workletUrl);
 
-            audioSource = audioCtx.createMediaStreamSource(mediaStream);
+            activeAudioSource = activeAudioCtx.createMediaStreamSource(activeMediaStream);
             
-            workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor', {
+            activeWorkletNode = new AudioWorkletNode(activeAudioCtx, 'pcm-processor', {
                 processorOptions: { nativeRate: nativeSampleRate }
             });
 
-            workletNode.port.onmessage = (e) => {
-                const oneSecBuffer = e.data;
-                writeQueue.push(oneSecBuffer);
-                processWriteQueue();
+            activeWorkletNode.port.onmessage = (e) => {
+                if (!isFinalAction) {
+                    writeQueue.push(e.data);
+                    processWriteQueue();
+                }
             };
 
-            audioSource.connect(workletNode);
-            const dummyGain = audioCtx.createGain();
+            activeAudioSource.connect(activeWorkletNode);
+            const dummyGain = activeAudioCtx.createGain();
             dummyGain.gain.value = 0;
-            workletNode.connect(dummyGain);
-            dummyGain.connect(audioCtx.destination);
+            activeWorkletNode.connect(dummyGain);
+            dummyGain.connect(activeAudioCtx.destination);
 
             silentAudio.play();
 
@@ -479,9 +529,8 @@
         
         log("停止ボタンが押されました");
 
-        cleanupAudio();
+        cleanupAudioSession(activeAudioCtx, activeMediaStream, activeWorkletNode, activeAudioSource);
 
-        // 書き込みキューが完全に空になるのを待ってから最終フラッシュ
         const checkAndFlush = async () => {
             if (isWriting || writeQueue.length > 0) {
                 setTimeout(checkAndFlush, 100);
