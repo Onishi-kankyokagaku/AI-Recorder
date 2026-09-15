@@ -64,7 +64,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.4.2 (Log Fixed)</span>
+        <span id="version-tag">Ver. 1.4.3 (No-Data-Loss)</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -113,7 +113,10 @@
 
     let writeQueue = [];
     let isWriting = false;
-    let lastLoggedSecMark = -1; // ログ重複防止フラグ
+    let lastLoggedSecMark = -1;
+
+    // リサンプリングの位置保持用変数
+    let resamplePhase = 0;
 
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
@@ -292,6 +295,7 @@
         opfsWritable = await opfsFileHandle.createWritable();
         samplesWrittenInChunk = 0;
         lastLoggedSecMark = -1;
+        resamplePhase = 0; // フェーズ初期化
     }
 
     async function processWriteQueue() {
@@ -303,16 +307,13 @@
             await opfsWritable.write(chunk.buffer);
             samplesWrittenInChunk += chunk.length;
 
-            // 経過秒数（切り捨て）を算出
             const currentSec = Math.floor(samplesWrittenInChunk / TARGET_SAMPLE_RATE);
 
-            // 10秒の倍数に達した「最初の一回のみ」ログ出力する
             if (currentSec > 0 && currentSec % 10 === 0 && currentSec !== lastLoggedSecMark) {
                 lastLoggedSecMark = currentSec;
                 log(`録音継続中: ${currentSec}秒経過 / 180秒`);
             }
 
-            // 3分（180秒＝288万サンプル）到達判定
             if (samplesWrittenInChunk >= THREE_MIN_SAMPLES && !isFlushing) {
                 isFlushing = true;
                 log("3分到達: OPFSから送信処理を開始します");
@@ -399,7 +400,6 @@
             
             await initOpfsSegment();
 
-            // 音声周波数はマイクネイティブ（48kHz等）で安定稼働
             audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             const nativeSampleRate = audioCtx.sampleRate;
             log(`マイク認識サンプルレート: ${nativeSampleRate} Hz`);
@@ -419,15 +419,21 @@
             audioSource = audioCtx.createMediaStreamSource(mediaStream);
             workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor');
 
-            // 正しいリサンプリング比率計算
-            const step = nativeSampleRate / TARGET_SAMPLE_RATE;
+            const ratio = nativeSampleRate / TARGET_SAMPLE_RATE;
 
+            // ★修正核心：連続性を保持する正確なリサンプリング（データのドロップを完全防止）
             workletNode.port.onmessage = (e) => {
                 const inputData = e.data;
                 const downsampled = [];
-                for (let i = 0; i < inputData.length; i += step) {
-                    downsampled.push(inputData[Math.floor(i)]);
+                
+                let i = resamplePhase;
+                while (i < inputData.length) {
+                    const idx = Math.floor(i);
+                    downsampled.push(inputData[idx]);
+                    i += ratio;
                 }
+                // 次のバッファへの繰り越し位置を保存（音切れを1サンプル単位で防ぐ）
+                resamplePhase = i - inputData.length;
 
                 if (downsampled.length > 0) {
                     writeQueue.push(new Float32Array(downsampled));
