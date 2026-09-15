@@ -44,11 +44,28 @@
 
     .qr-container { margin: 20px auto; padding: 15px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); display: inline-block; text-align: center; }
     .qr-container svg { display: block; margin: 0 auto; width: 200px; height: 200px; }
+
+    #debug-log {
+        margin-top: 20px;
+        background: #222;
+        color: #00ff66;
+        font-family: monospace;
+        font-size: 0.75rem;
+        text-align: left;
+        padding: 10px;
+        border-radius: 8px;
+        height: 160px;
+        overflow-y: auto;
+        word-break: break-all;
+        max-width: 400px;
+        margin-left: auto;
+        margin-right: auto;
+    }
 </style>
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.1.17</span>
+        <span id="version-tag">Ver. 1.4.0 (AudioWorklet + OPFS)</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -58,8 +75,9 @@
     
     <button id="start">● 録音開始</button>
     <button id="stop" disabled>■ 停止・議事録作成</button>
-    <!-- 【修正】初期表示テキストを準備中にして誤解を防ぐ -->
     <p id="status">システム初期化中（スプレッドシート作成中）...</p>
+
+    <div id="debug-log">--- 動作ログモニター ---</div>
 
     <audio id="silent-audio" loop>
         <source src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=" type="audio/wav">
@@ -71,7 +89,12 @@
     let currentSsId = null; 
     let currentSsUrl = null; 
     let currentLogRow = null; 
-    let rec = null, timer = null, audioCtx = null;
+    
+    let audioCtx = null;
+    let audioSource = null;
+    let workletNode = null;
+    let mediaStream = null;
+
     let isFinalAction = false;
     let worker = null;
     let sendCount = 0; 
@@ -80,19 +103,30 @@
     let sendQueue = [];
     let isSending = false;
 
+    // --- OPFS & 定数設定 ---
+    const TARGET_SAMPLE_RATE = 16000;
+    const THREE_MIN_SAMPLES = TARGET_SAMPLE_RATE * 180; // 3分間＝288万サンプル
+    
+    let opfsRoot = null;
+    let opfsFileHandle = null;
+    let opfsWritable = null;
+    let samplesWrittenInChunk = 0;
+
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
     const stopBtn = document.getElementById('stop');
     const silentAudio = document.getElementById('silent-audio');
     const recoverBtn = document.getElementById('recover-btn');
+    const debugLog = document.getElementById('debug-log');
 
     startBtn.disabled = true;
 
-    let logMessages = [];
     function log(msg) {
         console.log(msg);
-        logMessages.push(`[Log] ${msg}`);
-        if (logMessages.length > 10) logMessages.shift();
+        const now = new Date();
+        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+        debugLog.innerHTML += `<br>[${timeStr}] ${msg}`;
+        debugLog.scrollTop = debugLog.scrollHeight;
     }
 
     const requestWakeLock = async () => {
@@ -120,11 +154,7 @@
             <hr style="border: 0; border-top: 1px solid #d32f2f; margin: 15px 0;">
             <span style="font-size:0.75rem; color:#777;">[エラー詳細]: ${errorMsg}</span>
         `;
-        clearInterval(timer);
-        if (rec && rec.state !== "inactive") {
-            rec.stop();
-            rec.stream.getTracks().forEach(track => track.stop());
-        }
+        cleanupAudio();
         if (silentAudio) { silentAudio.pause(); silentAudio.currentTime = 0; }
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音停止（エラー検出）";
@@ -207,7 +237,7 @@
 
                 silentAudio.pause();
                 silentAudio.currentTime = 0;
-                if (audioCtx) { audioCtx.close(); audioCtx = null; } 
+                cleanupAudio();
                 if (wakeLock !== null) { wakeLock.release().then(() => { wakeLock = null; }); }                
                 window.onbeforeunload = null;
             } else if (data.type === 'memo') {
@@ -221,64 +251,99 @@
         }
     };
 
-    window.onload = () => {
-        
-        // 起動時に一瞬だけ大きなメモリダミー領域を確保して破棄し、V8の清掃モードを起動する
-        let dummy = new ArrayBuffer(500 * 1024 * 1024); // 100MBのダミー
-        dummy = null; // 即座に参照を切って清掃対象にする
-        
+    window.onload = async () => {
         if (recoverBtn) {
             recoverBtn.style.display = 'none';
+        }
+        try {
+            opfsRoot = await navigator.storage.getDirectory();
+            log("OPFS (ストレージ) の初期化成功");
+        } catch (e) {
+            log("OPFS非対応エラー: " + e.message);
         }
         log("SS発行リクエスト送信...");
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    const startSegment = async (stream) => {
-        let chunks = [];
-        rec = new MediaRecorder(stream);
-        rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    // --- AudioWorklet コード ---
+    const workletCode = `
+        class PCMProcessor extends AudioWorkletProcessor {
+            process(inputs, outputs, parameters) {
+                const input = inputs[0];
+                if (input && input.length > 0) {
+                    const inputChannel = input[0];
+                    if (inputChannel && inputChannel.length > 0) {
+                        this.port.postMessage(inputChannel);
+                    }
+                }
+                return true;
+            }
+        }
+        registerProcessor('pcm-processor', PCMProcessor);
+    `;
+
+    // 新しい OPFS セグメントファイルを作成
+    async function initOpfsSegment() {
+        if (opfsWritable) {
+            try { await opfsWritable.close(); } catch(e){}
+        }
+        opfsFileHandle = await opfsRoot.getFileHandle(`recording_chunk_${Date.now()}.bin`, { create: true });
+        opfsWritable = await opfsFileHandle.createWritable();
+        samplesWrittenInChunk = 0;
+    }
+
+    // OPFS ファイルからデータを読み出して Worker に回し、ストレージを削除
+    async function flushOpfsBuffer(isFinal) {
+        if (!opfsWritable || samplesWrittenInChunk === 0) return;
+
+        sendCount++;
+        let currentIndex = sendCount;
+        let sendType = isFinal ? "final" : "memo";
         
-        rec.onstop = async () => {
-            if (chunks.length === 0) return;
+        const currentHandle = opfsFileHandle;
+        const currentWritable = opfsWritable;
 
-            sendCount++; 
-            let currentIndex = sendCount; 
-            let sendType = isFinalAction ? "final" : "memo"; 
+        // 次のチャンク用に新しい OPFS ファイルを先に準備
+        if (!isFinal) {
+            await initOpfsSegment();
+        } else {
+            opfsWritable = null;
+            opfsFileHandle = null;
+        }
 
-            const blob = new Blob(chunks, { type: 'audio/webm' });
-            chunks = []; // メモリ解放
+        // 現在のストリームを確定・クローズしてリードオンリーのファイルオブジェクトを取得
+        await currentWritable.close();
+        const file = await currentHandle.getFile();
+        const arrayBuffer = await file.arrayBuffer();
 
-            const arrayBuffer = await blob.arrayBuffer();
-            
-            if (!isFinalAction) setTimeout(() => startSegment(stream), 0);
+        // Binaryデータを Float32Array に復元
+        const floatArray = new Float32Array(arrayBuffer);
 
-            if (!audioCtx) {
-                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            if (audioCtx.state === 'suspended') {
-                await audioCtx.resume();
-            }
+        log(`Part ${currentIndex} (${sendType}) OPFSから読み出し完了 (${(floatArray.length / TARGET_SAMPLE_RATE).toFixed(1)}秒分)`);
 
-            audioCtx.decodeAudioData(arrayBuffer, (buffer) => {
-                const channelData = buffer.getChannelData(0);
-                const floatArray = new Float32Array(channelData); 
-                
-                sendQueue.push({
-                    floatArray: floatArray,
-                    sampleRate: buffer.sampleRate,
-                    type: sendType,
-                    index: currentIndex
-                });
+        sendQueue.push({
+            floatArray: floatArray,
+            sampleRate: TARGET_SAMPLE_RATE,
+            type: sendType,
+            index: currentIndex
+        });
 
-                processNextQueue();
-            }, (err) => {
-                log("デコードエラー: " + err.message);
-            });
-        }; // rec.onstop 閉じ
+        // 読み出し完了した一時ファイルは即座にOPFSから物理削除して容量圧迫を防止
+        try {
+            await opfsRoot.removeEntry(currentHandle.name);
+        } catch (e) {
+            console.warn("OPFSファイル一時削除エラー:", e);
+        }
 
-        rec.start(1000); // 👈 復元：録音開始命令
-    }; // 👈 復元：startSegment 関数の閉じ
+        processNextQueue();
+    }
+
+    function cleanupAudio() {
+        if (workletNode) { workletNode.disconnect(); workletNode = null; }
+        if (audioSource) { audioSource.disconnect(); audioSource = null; }
+        if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); mediaStream = null; }
+        if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    }
 
     startBtn.onclick = async () => {
         startBtn.classList.add('recording-active');
@@ -296,24 +361,70 @@
             sendCount = 0; 
             sendQueue = [];
             isSending = false;
-            const stream = await navigator.mediaDevices.getUserMedia({ 
+            
+            await initOpfsSegment();
+
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const nativeSampleRate = audioCtx.sampleRate;
+            log(`マイク認識サンプルレート: ${nativeSampleRate} Hz`);
+
+            mediaStream = await navigator.mediaDevices.getUserMedia({ 
                 audio: {
-                    sampleRate: 16000,      // サンプルレートを 16kHz に抑える
-                    channelCount: 1,        // モノラル（1ch）に指定
-                    echoCancellation: true, // ノイズキャンセラー有効
-                    noiseSuppression: true  // ノイズ抑止有効
+                    echoCancellation: true,
+                    noiseSuppression: true
                 }
             });
-            silentAudio.play();
-            startSegment(stream);
 
-            timer = setInterval(() => {
-                if (rec && rec.state === "recording") rec.stop();
-            }, 180000); 
+            const blob = new Blob([workletCode], { type: 'application/javascript' });
+            const workletUrl = URL.createObjectURL(blob);
+            await audioCtx.audioWorklet.addModule(workletUrl);
+            URL.revokeObjectURL(workletUrl);
+
+            audioSource = audioCtx.createMediaStreamSource(mediaStream);
+            workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor');
+
+            const ratio = nativeSampleRate / TARGET_SAMPLE_RATE;
+
+            // ★核心処理：届いたPCM波形を即座に OPFS ストリーム（ディスク）へ流し込みメモリを即破棄
+            workletNode.port.onmessage = async (e) => {
+                const inputData = e.data;
+                
+                // 16kHzダウンサンプリング用の一時バッファ（128サンプル単位の超微小サイズ）
+                const downsampled = [];
+                for (let i = 0; i < inputData.length; i += ratio) {
+                    const idx = Math.floor(i);
+                    if (idx < inputData.length) {
+                        downsampled.push(inputData[idx]);
+                    }
+                }
+
+                if (downsampled.length > 0 && opfsWritable) {
+                    const f32Chunk = new Float32Array(downsampled);
+                    // メモリに溜めず、ディスクへストリーミング直書き
+                    await opfsWritable.write(f32Chunk.buffer);
+                    samplesWrittenInChunk += f32Chunk.length;
+                }
+
+                // 3分間（288万サンプル）ストレージに書き込んだら送信キューへ送出
+                if (samplesWrittenInChunk >= THREE_MIN_SAMPLES) {
+                    log("3分到達: OPFSから送信処理を開始します");
+                    await flushOpfsBuffer(false);
+                }
+            };
+
+            audioSource.connect(workletNode);
+            const dummyGain = audioCtx.createGain();
+            dummyGain.gain.value = 0;
+            workletNode.connect(dummyGain);
+            dummyGain.connect(audioCtx.destination);
+
+            silentAudio.play();
 
             startBtn.disabled = true;
             stopBtn.disabled = false;
             status.innerHTML = "録音中...";
+            log("AudioWorklet + OPFS ストリーミング録音開始");
+
         } catch (err) {
             log("開始エラー: " + err.message);
         }
@@ -323,11 +434,15 @@
         isFinalAction = true;
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音開始";
-        clearInterval(timer);
-        if (rec && rec.state !== "inactive") {
-            rec.stop();
-            rec.stream.getTracks().forEach(track => track.stop());
+        
+        log("停止ボタンが押されました");
+
+        cleanupAudio();
+
+        if (samplesWrittenInChunk > 0) {
+            await flushOpfsBuffer(true);
         }
+
         status.innerHTML = "最終データを解析中...";
         stopBtn.disabled = true;
     };
