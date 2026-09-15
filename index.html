@@ -64,7 +64,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.4.3 (No-Data-Loss)</span>
+        <span id="version-tag">Ver. 1.4.4 (Thread-Safe Worklet)</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -114,9 +114,6 @@
     let writeQueue = [];
     let isWriting = false;
     let lastLoggedSecMark = -1;
-
-    // リサンプリングの位置保持用変数
-    let resamplePhase = 0;
 
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
@@ -271,14 +268,40 @@
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
+    // ★大改修：Workletスレッド側で 16kHz間引き ＋ 1秒（16,000サンプル）ごとのパッキングを実施
     const workletCode = `
         class PCMProcessor extends AudioWorkletProcessor {
+            constructor(options) {
+                super();
+                this.nativeRate = options.processorOptions.nativeRate;
+                this.targetRate = 16000;
+                this.ratio = this.nativeRate / this.targetRate;
+                this.resamplePhase = 0;
+                
+                // 1秒分（16,000サンプル）の固定バッファ
+                this.buffer = new Float32Array(16000);
+                this.bufferIndex = 0;
+            }
+
             process(inputs, outputs, parameters) {
                 const input = inputs[0];
                 if (input && input.length > 0) {
                     const inputChannel = input[0];
                     if (inputChannel && inputChannel.length > 0) {
-                        this.port.postMessage(inputChannel);
+                        let i = this.resamplePhase;
+                        while (i < inputChannel.length) {
+                            const idx = Math.floor(i);
+                            this.buffer[this.bufferIndex++] = inputChannel[idx];
+
+                            // 1秒分溜まったらメインスレッドへ一括送信（転送権譲渡でコピーコストゼロ）
+                            if (this.bufferIndex >= 16000) {
+                                this.port.postMessage(this.buffer);
+                                this.buffer = new Float32Array(16000);
+                                this.bufferIndex = 0;
+                            }
+                            i += this.ratio;
+                        }
+                        this.resamplePhase = i - inputChannel.length;
                     }
                 }
                 return true;
@@ -295,7 +318,6 @@
         opfsWritable = await opfsFileHandle.createWritable();
         samplesWrittenInChunk = 0;
         lastLoggedSecMark = -1;
-        resamplePhase = 0; // フェーズ初期化
     }
 
     async function processWriteQueue() {
@@ -417,28 +439,17 @@
             URL.revokeObjectURL(workletUrl);
 
             audioSource = audioCtx.createMediaStreamSource(mediaStream);
-            workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor');
+            
+            // Worklet側へマイクの生周波数を渡してスレッド内でダウンサンプリング
+            workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor', {
+                processorOptions: { nativeRate: nativeSampleRate }
+            });
 
-            const ratio = nativeSampleRate / TARGET_SAMPLE_RATE;
-
-            // ★修正核心：連続性を保持する正確なリサンプリング（データのドロップを完全防止）
+            // 1秒間に1回だけ、1秒分にまとめられた16kHz波形を受け取りOPFSキューへ
             workletNode.port.onmessage = (e) => {
-                const inputData = e.data;
-                const downsampled = [];
-                
-                let i = resamplePhase;
-                while (i < inputData.length) {
-                    const idx = Math.floor(i);
-                    downsampled.push(inputData[idx]);
-                    i += ratio;
-                }
-                // 次のバッファへの繰り越し位置を保存（音切れを1サンプル単位で防ぐ）
-                resamplePhase = i - inputData.length;
-
-                if (downsampled.length > 0) {
-                    writeQueue.push(new Float32Array(downsampled));
-                    processWriteQueue();
-                }
+                const oneSecBuffer = e.data; // Float32Array (16,000サンプル)
+                writeQueue.push(oneSecBuffer);
+                processWriteQueue();
             };
 
             audioSource.connect(workletNode);
@@ -472,7 +483,7 @@
             if (samplesWrittenInChunk > 0) {
                 await flushOpfsBuffer(true);
             }
-        }, 300);
+        }, 500);
 
         status.innerHTML = "最終データを解析中...";
         stopBtn.disabled = true;
