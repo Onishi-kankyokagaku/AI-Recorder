@@ -64,7 +64,7 @@
 </head>
 <body>
     <div class="ver-container">
-        <span id="version-tag">Ver. 1.5.0 (Stream Baton-Pass)</span>
+        <span id="version-tag">Ver. 1.7.0 (30sec Hard Reset)</span>
     </div>
 
     <h1>AI議事録レコーダー</h1>
@@ -89,32 +89,18 @@
     let currentSsUrl = null; 
     let currentLogRow = null; 
     
-    // 現在アクティブなオーディオノード
-    let activeAudioCtx = null;
-    let activeMediaStream = null;
-    let activeWorkletNode = null;
-    let activeAudioSource = null;
+    let currentMediaStream = null;
+    let currentMediaRecorder = null;
+    let segmentTimer = null;
 
     let isFinalAction = false;
+    let isRecordingSession = false;
     let worker = null;
     let sendCount = 0; 
     let wakeLock = null;
 
     let sendQueue = [];
     let isSending = false;
-
-    const TARGET_SAMPLE_RATE = 16000;
-    const THREE_MIN_SAMPLES = TARGET_SAMPLE_RATE * 180; // 3分間＝288万サンプル
-    
-    let opfsRoot = null;
-    let opfsFileHandle = null;
-    let opfsWritable = null;
-    let samplesWrittenInChunk = 0;
-    let isFlushing = false;
-
-    let writeQueue = [];
-    let isWriting = false;
-    let lastLoggedSecMark = -1;
 
     const status = document.getElementById('status');
     const startBtn = document.getElementById('start');
@@ -158,7 +144,7 @@
             <hr style="border: 0; border-top: 1px solid #d32f2f; margin: 15px 0;">
             <span style="font-size:0.75rem; color:#777;">[エラー詳細]: ${errorMsg}</span>
         `;
-        cleanupAudioSession(activeAudioCtx, activeMediaStream, activeWorkletNode, activeAudioSource);
+        hardStopCurrentStream();
         if (silentAudio) { silentAudio.pause(); silentAudio.currentTime = 0; }
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音停止（エラー検出）";
@@ -241,7 +227,7 @@
 
                 silentAudio.pause();
                 silentAudio.currentTime = 0;
-                cleanupAudioSession(activeAudioCtx, activeMediaStream, activeWorkletNode, activeAudioSource);
+                hardStopCurrentStream();
                 if (wakeLock !== null) { wakeLock.release().then(() => { wakeLock = null; }); }                
                 window.onbeforeunload = null;
             } else if (data.type === 'memo') {
@@ -259,201 +245,97 @@
         if (recoverBtn) {
             recoverBtn.style.display = 'none';
         }
-        try {
-            opfsRoot = await navigator.storage.getDirectory();
-            log("OPFS (ストレージ) 初期化成功");
-        } catch (e) {
-            log("OPFS非対応エラー: " + e.message);
-        }
         log("SS発行リクエスト送信...");
         worker.postMessage({ type: 'init', gasUrl: GAS_URL });
     };
 
-    const workletCode = `
-        class PCMProcessor extends AudioWorkletProcessor {
-            constructor(options) {
-                super();
-                this.nativeRate = options.processorOptions.nativeRate;
-                this.targetRate = 16000;
-                this.ratio = this.nativeRate / this.targetRate;
-                this.resamplePhase = 0;
-                this.buffer = new Float32Array(16000);
-                this.bufferIndex = 0;
-            }
-
-            process(inputs, outputs, parameters) {
-                const input = inputs[0];
-                if (input && input.length > 0) {
-                    const inputChannel = input[0];
-                    if (inputChannel && inputChannel.length > 0) {
-                        let i = this.resamplePhase;
-                        while (i < inputChannel.length) {
-                            const idx = Math.floor(i);
-                            this.buffer[this.bufferIndex++] = inputChannel[idx];
-
-                            if (this.bufferIndex >= 16000) {
-                                this.port.postMessage(this.buffer);
-                                this.buffer = new Float32Array(16000);
-                                this.bufferIndex = 0;
-                            }
-                            i += this.ratio;
-                        }
-                        this.resamplePhase = i - inputChannel.length;
-                    }
-                }
-                return true;
-            }
+    // マイク・トラック・録音オブジェクトの完全強制削除（メモリリセットの肝）
+    function hardStopCurrentStream() {
+        if (currentMediaRecorder && currentMediaRecorder.state !== "inactive") {
+            try { currentMediaRecorder.stop(); } catch(e){}
         }
-        registerProcessor('pcm-processor', PCMProcessor);
-    `;
-
-    async function initOpfsSegment() {
-        opfsFileHandle = await opfsRoot.getFileHandle(`recording_chunk_${Date.now()}.bin`, { create: true });
-        opfsWritable = await opfsFileHandle.createWritable();
-        samplesWrittenInChunk = 0;
-        lastLoggedSecMark = -1;
-    }
-
-    async function processWriteQueue() {
-        if (isWriting || writeQueue.length === 0 || !opfsWritable) return;
-        isWriting = true;
-
-        const chunk = writeQueue.shift();
-        try {
-            await opfsWritable.write(chunk.buffer);
-            samplesWrittenInChunk += chunk.length;
-
-            const currentSec = Math.floor(samplesWrittenInChunk / TARGET_SAMPLE_RATE);
-
-            if (currentSec > 0 && currentSec % 10 === 0 && currentSec !== lastLoggedSecMark) {
-                lastLoggedSecMark = currentSec;
-                log(`録音継続中: ${currentSec}秒経過 / 180秒`);
-            }
-
-            // 3分到達時のバトンタッチトリガー
-            if (samplesWrittenInChunk >= THREE_MIN_SAMPLES && !isFlushing && !isFinalAction) {
-                isFlushing = true;
-                log("3分到達: マイクバトンタッチ＆送信処理を開始");
-                
-                // 次のストリームへの移行と旧ストリーム破棄（C++メモリ完全解放）
-                performStreamBatonPass().then(() => {
-                    return flushOpfsBuffer(false);
-                }).then(() => {
-                    isFlushing = false;
-                }).catch(err => {
-                    log("バトンタッチ失敗: " + err.message);
-                    isFlushing = false;
-                });
-            }
-        } catch (err) {
-            console.error("OPFS書き込みエラー:", err);
-        } finally {
-            isWriting = false;
-            if (writeQueue.length > 0) {
-                setTimeout(processWriteQueue, 0);
-            }
+        if (currentMediaStream) {
+            currentMediaStream.getTracks().forEach(track => {
+                track.stop(); // OSレベルでマイク入力破棄
+            });
         }
+        currentMediaRecorder = null;
+        currentMediaStream = null;
     }
 
-    // ★核心機能：ストリームのバトンタッチ（新マイク起動 ➔ 旧マイク停止・C++メモリ完全解放）
-    async function performStreamBatonPass() {
-        log("🔄 [バトンタッチ] 新マイクストリームの初期化中...");
-        
-        // 1. 旧セッションの退避
-        const oldCtx = activeAudioCtx;
-        const oldStream = activeMediaStream;
-        const oldWorklet = activeWorkletNode;
-        const oldSource = activeAudioSource;
-
-        // 2. 新セッションの起動（旧マイクを動かしたまま裏で準備）
-        const newCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const nativeSampleRate = newCtx.sampleRate;
-
-        const newStream = await navigator.mediaDevices.getUserMedia({ 
-            audio: { echoCancellation: true, noiseSuppression: true }
-        });
-
-        const blob = new Blob([workletCode], { type: 'application/javascript' });
-        const workletUrl = URL.createObjectURL(blob);
-        await newCtx.audioWorklet.addModule(workletUrl);
-        URL.revokeObjectURL(workletUrl);
-
-        const newSource = newCtx.createMediaStreamSource(newStream);
-        const newWorklet = new AudioWorkletNode(newCtx, 'pcm-processor', {
-            processorOptions: { nativeRate: nativeSampleRate }
-        });
-
-        newWorklet.port.onmessage = (e) => {
-            if (!isFinalAction) {
-                writeQueue.push(e.data);
-                processWriteQueue();
-            }
-        };
-
-        newSource.connect(newWorklet);
-        const dummyGain = newCtx.createGain();
-        dummyGain.gain.value = 0;
-        newWorklet.connect(dummyGain);
-        dummyGain.connect(newCtx.destination);
-
-        // 3. アクティブ参照を新セッションへ切り替え（シームレス接続）
-        activeAudioCtx = newCtx;
-        activeMediaStream = newStream;
-        activeWorkletNode = newWorklet;
-        activeAudioSource = newSource;
-
-        log("✅ [バトンタッチ] 新マイク接続完了。旧マイク(C++バッファ)を完全破棄します");
-
-        // 4. 旧マイクストリームを物理停止（C++層メモリの即時OS全解放）
-        cleanupAudioSession(oldCtx, oldStream, oldWorklet, oldSource);
-    }
-
-    function cleanupAudioSession(ctx, stream, worklet, source) {
-        if (worklet) { worklet.disconnect(); }
-        if (source) { source.disconnect(); }
-        if (stream) { stream.getTracks().forEach(track => track.stop()); }
-        if (ctx) { ctx.close(); }
-    }
-
-    async function flushOpfsBuffer(isFinal) {
-        if (!opfsWritable || samplesWrittenInChunk === 0) return;
+    // 30秒単一セグメントの実行関数
+    async function start30SecSegment() {
+        if (!isRecordingSession) return;
 
         sendCount++;
-        let currentIndex = sendCount;
-        let sendType = isFinal ? "final" : "memo";
-        
-        const currentHandle = opfsFileHandle;
-        const currentWritable = opfsWritable;
+        const currentIndex = sendCount;
+        const sendType = isFinalAction ? "final" : "memo";
 
-        opfsWritable = null;
-        opfsFileHandle = null;
-
-        if (!isFinal) {
-            await initOpfsSegment();
-        }
-
-        await currentWritable.close();
-
-        const file = await currentHandle.getFile();
-        const arrayBuffer = await file.arrayBuffer();
-        const floatArray = new Float32Array(arrayBuffer);
-
-        log(`Part ${currentIndex} (${sendType}) OPFS読み出し完了 (${(floatArray.length / TARGET_SAMPLE_RATE).toFixed(1)}秒分)`);
-
-        sendQueue.push({
-            floatArray: floatArray,
-            sampleRate: TARGET_SAMPLE_RATE,
-            type: sendType,
-            index: currentIndex
-        });
+        log(`▶️ Part ${currentIndex} 録音開始 (マイク新生成)`);
 
         try {
-            await opfsRoot.removeEntry(currentHandle.name);
-        } catch (e) {
-            console.warn("OPFSファイル削除失敗:", e);
-        }
+            // 毎回完全にマイクを開き直す（C++バッファ完全ゼロリセット）
+            currentMediaStream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    sampleRate: 16000,
+                    channelCount: 1,
+                    echoCancellation: true,
+                    noiseSuppression: true
+                }
+            });
 
-        processNextQueue();
+            const chunks = [];
+            currentMediaRecorder = new MediaRecorder(currentMediaStream);
+
+            currentMediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) chunks.push(e.data);
+            };
+
+            currentMediaRecorder.onstop = async () => {
+                log(`⏹️ Part ${currentIndex} 録音完了 ➔ メモリ解放＆デコード処理`);
+                
+                // 1. マイクストリームを即座に破棄してメモリ解放
+                if (currentMediaStream) {
+                    currentMediaStream.getTracks().forEach(t => t.stop());
+                }
+
+                // 2. Blob から Float32Array に変換して Worker 送信
+                const blob = new Blob(chunks, { type: 'audio/webm' });
+                const arrayBuffer = await blob.arrayBuffer();
+
+                const tempCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                tempCtx.decodeAudioData(arrayBuffer, (decodedBuffer) => {
+                    const channelData = decodedBuffer.getChannelData(0);
+                    const floatArray = new Float32Array(channelData);
+
+                    sendQueue.push({
+                        floatArray: floatArray,
+                        sampleRate: decodedBuffer.sampleRate,
+                        type: sendType,
+                        index: currentIndex
+                    });
+                    
+                    tempCtx.close(); // コンテキスト破棄
+                    processNextQueue();
+                }, (err) => {
+                    log(`デコードエラー(Part ${currentIndex}): ` + err.message);
+                    tempCtx.close();
+                });
+            };
+
+            currentMediaRecorder.start();
+
+            // 停止ボタンが押されていない場合のみ、30秒後に次のセグメントへバトンタッチ
+            if (!isFinalAction) {
+                segmentTimer = setTimeout(() => {
+                    hardStopCurrentStream(); // 旧ストリーム物理破棄
+                    start30SecSegment();     // 新30秒セグメント開始
+                }, 30000); // 30秒間
+            }
+
+        } catch (err) {
+            log("録音開始失敗: " + err.message);
+        }
     }
 
     startBtn.onclick = async () => {
@@ -467,80 +349,34 @@
         };
 
         if (currentLogRow) { worker.postMessage({ type: 'recording', gasUrl: GAS_URL, logRow: currentLogRow }); }
-        try {
-            isFinalAction = false;
-            sendCount = 0; 
-            sendQueue = [];
-            isSending = false;
-            writeQueue = [];
-            isWriting = false;
-            isFlushing = false;
-            
-            await initOpfsSegment();
 
-            activeAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            const nativeSampleRate = activeAudioCtx.sampleRate;
-            log(`マイク認識サンプルレート: ${nativeSampleRate} Hz`);
+        isFinalAction = false;
+        isRecordingSession = true;
+        sendCount = 0; 
+        sendQueue = [];
+        isSending = false;
 
-            activeMediaStream = await navigator.mediaDevices.getUserMedia({ 
-                audio: { echoCancellation: true, noiseSuppression: true }
-            });
+        silentAudio.play();
 
-            const blob = new Blob([workletCode], { type: 'application/javascript' });
-            const workletUrl = URL.createObjectURL(blob);
-            await activeAudioCtx.audioWorklet.addModule(workletUrl);
-            URL.revokeObjectURL(workletUrl);
-
-            activeAudioSource = activeAudioCtx.createMediaStreamSource(activeMediaStream);
-            
-            activeWorkletNode = new AudioWorkletNode(activeAudioCtx, 'pcm-processor', {
-                processorOptions: { nativeRate: nativeSampleRate }
-            });
-
-            activeWorkletNode.port.onmessage = (e) => {
-                if (!isFinalAction) {
-                    writeQueue.push(e.data);
-                    processWriteQueue();
-                }
-            };
-
-            activeAudioSource.connect(activeWorkletNode);
-            const dummyGain = activeAudioCtx.createGain();
-            dummyGain.gain.value = 0;
-            activeWorkletNode.connect(dummyGain);
-            dummyGain.connect(activeAudioCtx.destination);
-
-            silentAudio.play();
-
-            startBtn.disabled = true;
-            stopBtn.disabled = false;
-            status.innerHTML = "録音中...";
-            log("AudioWorklet + OPFS ストリーミング録音開始");
-
-        } catch (err) {
-            log("開始エラー: " + err.message);
-        }
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        status.innerHTML = "録音中... (30秒リセットモード)";
+        
+        start30SecSegment();
     };
 
     stopBtn.onclick = async () => {
         isFinalAction = true;
+        isRecordingSession = false;
         startBtn.classList.remove('recording-active');
         startBtn.innerText = "● 録音開始";
         
         log("停止ボタンが押されました");
+        clearTimeout(segmentTimer);
 
-        cleanupAudioSession(activeAudioCtx, activeMediaStream, activeWorkletNode, activeAudioSource);
-
-        const checkAndFlush = async () => {
-            if (isWriting || writeQueue.length > 0) {
-                setTimeout(checkAndFlush, 100);
-                return;
-            }
-            if (samplesWrittenInChunk > 0) {
-                await flushOpfsBuffer(true);
-            }
-        };
-        await checkAndFlush();
+        if (currentMediaRecorder && currentMediaRecorder.state === "recording") {
+            currentMediaRecorder.stop();
+        }
 
         status.innerHTML = "最終データを解析中...";
         stopBtn.disabled = true;
